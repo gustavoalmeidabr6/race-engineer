@@ -1,0 +1,26 @@
+{
+  "name": "Yas Marina",
+  "length_m": 5281,
+  "_note": "Abu Dhabi 2021+ revised layout.",
+  "pit_entry_m": 5100,
+  "pit_entry_side": "right",
+  "pit_lane_speed_kph": 80,
+  "corners": [
+    {"id": "T1",  "name": "T1",   "lap_distance_m": 350,  "type": "medium"},
+    {"id": "T2",  "name": "T2",   "lap_distance_m": 510,  "type": "medium"},
+    {"id": "T3",  "name": "T3",   "lap_distance_m": 700,  "type": "fast"},
+    {"id": "T4",  "name": "T4",   "lap_distance_m": 1430, "type": "slow"},
+    {"id": "T5",  "name": "T5",   "lap_distance_m": 1640, "type": "fast"},
+    {"id": "T6",  "name": "T6",   "lap_distance_m": 2300, "type": "slow"},
+    {"id": "T7",  "name": "T7",   "lap_distance_m": 2470, "type": "medium"},
+    {"id": "T8",  "name": "T8",   "lap_distance_m": 2790, "type": "medium"},
+    {"id": "T9",  "name": "T9",   "lap_distance_m": 3080, "type": "fast"},
+    {"id": "T10", "name": "T10",  "lap_distance_m": 3280, "type": "fast"},
+    {"id": "T11", "name": "T11",  "lap_distance_m": 3640, "type": "medium"},
+    {"id": "T12", "name": "T12",  "lap_distance_m": 3870, "type": "medium"},
+    {"id": "T13", "name": "T13",  "lap_distance_m": 4280, "type": "medium"},
+    {"id": "T14", "name": "T14",  "lap_distance_m": 4520, "type": "medium"},
+    {"id": "T15", "name": "T15",  "lap_distance_m": 4730, "type": "medium"},
+    {"id": "T16", "name": "T16",  "lap_distance_m": 4990, "type": "medium"}
+  ]
+}

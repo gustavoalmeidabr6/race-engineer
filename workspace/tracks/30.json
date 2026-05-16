@@ -1,0 +1,26 @@
+{
+  "name": "Miami",
+  "length_m": 5412,
+  "_note": "Miami International Autodrome around Hard Rock Stadium.",
+  "corners": [
+    {"id": "T1",  "name": "T1",   "lap_distance_m": 540,  "type": "slow"},
+    {"id": "T2",  "name": "T2",   "lap_distance_m": 670,  "type": "fast"},
+    {"id": "T3",  "name": "T3",   "lap_distance_m": 800,  "type": "fast"},
+    {"id": "T4",  "name": "T4",   "lap_distance_m": 1090, "type": "medium"},
+    {"id": "T5",  "name": "T5",   "lap_distance_m": 1310, "type": "medium"},
+    {"id": "T6",  "name": "T6",   "lap_distance_m": 1640, "type": "fast"},
+    {"id": "T7",  "name": "T7",   "lap_distance_m": 1960, "type": "fast"},
+    {"id": "T8",  "name": "T8",   "lap_distance_m": 2380, "type": "slow"},
+    {"id": "T9",  "name": "T9",   "lap_distance_m": 2510, "type": "fast"},
+    {"id": "T10", "name": "T10",  "lap_distance_m": 2780, "type": "fast"},
+    {"id": "T11", "name": "T11",  "lap_distance_m": 3030, "type": "slow"},
+    {"id": "T12", "name": "T12",  "lap_distance_m": 3290, "type": "medium"},
+    {"id": "T13", "name": "T13",  "lap_distance_m": 3450, "type": "medium"},
+    {"id": "T14", "name": "T14",  "lap_distance_m": 3590, "type": "fast"},
+    {"id": "T15", "name": "T15",  "lap_distance_m": 4490, "type": "slow"},
+    {"id": "T16", "name": "T16",  "lap_distance_m": 4790, "type": "slow"},
+    {"id": "T17", "name": "T17",  "lap_distance_m": 4940, "type": "medium"},
+    {"id": "T18", "name": "T18",  "lap_distance_m": 5080, "type": "medium"},
+    {"id": "T19", "name": "T19",  "lap_distance_m": 5260, "type": "medium"}
+  ]
+}

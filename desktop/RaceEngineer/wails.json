@@ -1,0 +1,19 @@
+{
+  "$schema": "https://wails.io/schemas/config.v2.json",
+  "name": "RaceEngineer",
+  "outputfilename": "RaceEngineer",
+  "frontend:install": "../build-frontend.sh install",
+  "frontend:build": "../build-frontend.sh build",
+  "frontend:dev:watcher": "../build-frontend.sh dev",
+  "frontend:dev:serverUrl": "http://localhost:8092",
+  "author": {
+    "name": "iamtushar324",
+    "email": "iamtushar324@gmail.com"
+  },
+  "info": {
+    "productName": "Race Engineer",
+    "productVersion": "0.1.0",
+    "copyright": "© 2026 iamtushar324",
+    "comments": "AI-powered F1 25 race engineer."
+  }
+}

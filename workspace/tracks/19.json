@@ -1,0 +1,24 @@
+{
+  "name": "Mexico City",
+  "length_m": 4304,
+  "_note": "Autodromo Hermanos Rodriguez. Stadium section is iconic.",
+  "corners": [
+    {"id": "T1",  "name": "T1",       "lap_distance_m": 850,  "type": "slow"},
+    {"id": "T2",  "name": "T2",       "lap_distance_m": 1010, "type": "slow"},
+    {"id": "T3",  "name": "T3",       "lap_distance_m": 1110, "type": "medium"},
+    {"id": "T4",  "name": "T4",       "lap_distance_m": 1380, "type": "fast"},
+    {"id": "T5",  "name": "T5",       "lap_distance_m": 1610, "type": "medium"},
+    {"id": "T6",  "name": "T6",       "lap_distance_m": 1900, "type": "fast"},
+    {"id": "T7",  "name": "Esses 1",  "lap_distance_m": 2210, "type": "fast"},
+    {"id": "T8",  "name": "Esses 2",  "lap_distance_m": 2370, "type": "fast"},
+    {"id": "T9",  "name": "Esses 3",  "lap_distance_m": 2530, "type": "fast"},
+    {"id": "T10", "name": "T10",      "lap_distance_m": 2870, "type": "medium"},
+    {"id": "T11", "name": "T11",      "lap_distance_m": 3070, "type": "medium"},
+    {"id": "T12", "name": "Stadium 1","lap_distance_m": 3340, "type": "slow"},
+    {"id": "T13", "name": "Stadium 2","lap_distance_m": 3450, "type": "slow"},
+    {"id": "T14", "name": "Stadium 3","lap_distance_m": 3580, "type": "slow"},
+    {"id": "T15", "name": "Peraltada","lap_distance_m": 3870, "type": "fast"},
+    {"id": "T16", "name": "T16",      "lap_distance_m": 3980, "type": "fast"},
+    {"id": "T17", "name": "T17",      "lap_distance_m": 4090, "type": "fast"}
+  ]
+}

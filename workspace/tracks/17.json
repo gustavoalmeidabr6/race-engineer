@@ -1,0 +1,17 @@
+{
+  "name": "Red Bull Ring",
+  "length_m": 4318,
+  "_note": "Spielberg, Austria. Short lap, 10 turns.",
+  "corners": [
+    {"id": "T1",  "name": "Niki Lauda",  "lap_distance_m": 600,  "type": "slow"},
+    {"id": "T2",  "name": "Remus",       "lap_distance_m": 1190, "type": "slow"},
+    {"id": "T3",  "name": "Schlossgold", "lap_distance_m": 1830, "type": "slow"},
+    {"id": "T4",  "name": "Rauch",       "lap_distance_m": 2240, "type": "medium"},
+    {"id": "T5",  "name": "Wurth",       "lap_distance_m": 2580, "type": "fast"},
+    {"id": "T6",  "name": "Rindt",       "lap_distance_m": 2900, "type": "fast"},
+    {"id": "T7",  "name": "T7",          "lap_distance_m": 3160, "type": "fast"},
+    {"id": "T8",  "name": "T8",          "lap_distance_m": 3470, "type": "medium"},
+    {"id": "T9",  "name": "T9",          "lap_distance_m": 3760, "type": "fast"},
+    {"id": "T10", "name": "T10",         "lap_distance_m": 4040, "type": "fast"}
+  ]
+}

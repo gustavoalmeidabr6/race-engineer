@@ -1,0 +1,25 @@
+{
+  "name": "Silverstone",
+  "length_m": 5891,
+  "_note": "GP layout. Sectors split ~Maggotts entry / Stowe entry.",
+  "pit_entry_m": 5700,
+  "pit_entry_side": "right",
+  "pit_lane_speed_kph": 80,
+  "corners": [
+    {"id": "T1",  "name": "Abbey",      "lap_distance_m": 280,  "type": "fast"},
+    {"id": "T2",  "name": "Farm",       "lap_distance_m": 460,  "type": "fast"},
+    {"id": "T3",  "name": "Village",    "lap_distance_m": 720,  "type": "slow"},
+    {"id": "T4",  "name": "The Loop",   "lap_distance_m": 870,  "type": "slow"},
+    {"id": "T5",  "name": "Aintree",    "lap_distance_m": 1010, "type": "medium"},
+    {"id": "T6",  "name": "Brooklands", "lap_distance_m": 1820, "type": "medium"},
+    {"id": "T7",  "name": "Luffield",   "lap_distance_m": 2010, "type": "slow"},
+    {"id": "T8",  "name": "Woodcote",   "lap_distance_m": 2230, "type": "kink"},
+    {"id": "T9",  "name": "Copse",      "lap_distance_m": 2480, "type": "fast"},
+    {"id": "T10", "name": "Maggotts",   "lap_distance_m": 3050, "type": "fast"},
+    {"id": "T11", "name": "Becketts",   "lap_distance_m": 3220, "type": "fast"},
+    {"id": "T12", "name": "Chapel",     "lap_distance_m": 3430, "type": "fast"},
+    {"id": "T13", "name": "Stowe",      "lap_distance_m": 4380, "type": "fast"},
+    {"id": "T14", "name": "Vale",       "lap_distance_m": 4810, "type": "slow"},
+    {"id": "T15", "name": "Club",       "lap_distance_m": 5050, "type": "medium"}
+  ]
+}

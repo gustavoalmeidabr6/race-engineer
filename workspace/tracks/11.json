@@ -1,0 +1,21 @@
+{
+  "name": "Monza",
+  "length_m": 5793,
+  "_note": "Few corners, long straights — only 11 named turns.",
+  "pit_entry_m": 5550,
+  "pit_entry_side": "right",
+  "pit_lane_speed_kph": 80,
+  "corners": [
+    {"id": "T1",  "name": "Variante del Rettifilo 1","lap_distance_m": 600,  "type": "slow"},
+    {"id": "T2",  "name": "Variante del Rettifilo 2","lap_distance_m": 700,  "type": "slow"},
+    {"id": "T3",  "name": "Curva Biassono",          "lap_distance_m": 1310, "type": "fast"},
+    {"id": "T4",  "name": "Variante della Roggia 1", "lap_distance_m": 1980, "type": "slow"},
+    {"id": "T5",  "name": "Variante della Roggia 2", "lap_distance_m": 2080, "type": "slow"},
+    {"id": "T6",  "name": "Lesmo 1",                  "lap_distance_m": 2580, "type": "medium"},
+    {"id": "T7",  "name": "Lesmo 2",                  "lap_distance_m": 2820, "type": "medium"},
+    {"id": "T8",  "name": "Variante Ascari 1",        "lap_distance_m": 3870, "type": "fast"},
+    {"id": "T9",  "name": "Variante Ascari 2",        "lap_distance_m": 3990, "type": "medium"},
+    {"id": "T10", "name": "Variante Ascari 3",        "lap_distance_m": 4110, "type": "medium"},
+    {"id": "T11", "name": "Curva Parabolica",         "lap_distance_m": 5250, "type": "fast"}
+  ]
+}

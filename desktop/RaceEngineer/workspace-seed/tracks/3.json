@@ -1,0 +1,25 @@
+{
+  "name": "Bahrain",
+  "length_m": 5412,
+  "_note": "Sakhir GP layout. Distances ±50m.",
+  "pit_entry_m": 5200,
+  "pit_entry_side": "right",
+  "pit_lane_speed_kph": 80,
+  "corners": [
+    {"id": "T1", "name": "T1",        "lap_distance_m": 480,  "type": "slow"},
+    {"id": "T2", "name": "T2",        "lap_distance_m": 660,  "type": "medium"},
+    {"id": "T3", "name": "T3",        "lap_distance_m": 800,  "type": "medium"},
+    {"id": "T4", "name": "T4",        "lap_distance_m": 1740, "type": "slow"},
+    {"id": "T5", "name": "T5",        "lap_distance_m": 1900, "type": "slow"},
+    {"id": "T6", "name": "T6",        "lap_distance_m": 2080, "type": "fast"},
+    {"id": "T7", "name": "T7",        "lap_distance_m": 2300, "type": "medium"},
+    {"id": "T8", "name": "T8",        "lap_distance_m": 2810, "type": "slow"},
+    {"id": "T9", "name": "T9",        "lap_distance_m": 2980, "type": "medium"},
+    {"id": "T10","name": "T10",       "lap_distance_m": 3300, "type": "slow"},
+    {"id": "T11","name": "T11",       "lap_distance_m": 3500, "type": "slow"},
+    {"id": "T12","name": "T12",       "lap_distance_m": 3700, "type": "medium"},
+    {"id": "T13","name": "T13",       "lap_distance_m": 4180, "type": "fast"},
+    {"id": "T14","name": "T14",       "lap_distance_m": 4710, "type": "slow"},
+    {"id": "T15","name": "T15",       "lap_distance_m": 5040, "type": "fast"}
+  ]
+}

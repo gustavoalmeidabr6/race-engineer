@@ -1,0 +1,28 @@
+{
+  "name": "Suzuka",
+  "length_m": 5807,
+  "_note": "Figure-8 layout; 130R is the famous fast left.",
+  "pit_entry_m": 5600,
+  "pit_entry_side": "right",
+  "pit_lane_speed_kph": 80,
+  "corners": [
+    {"id": "T1",  "name": "T1",          "lap_distance_m": 600,  "type": "fast"},
+    {"id": "T2",  "name": "T2",          "lap_distance_m": 730,  "type": "medium"},
+    {"id": "T3",  "name": "S Curves 1",  "lap_distance_m": 990,  "type": "fast"},
+    {"id": "T4",  "name": "S Curves 2",  "lap_distance_m": 1140, "type": "fast"},
+    {"id": "T5",  "name": "S Curves 3",  "lap_distance_m": 1280, "type": "fast"},
+    {"id": "T6",  "name": "S Curves 4",  "lap_distance_m": 1430, "type": "fast"},
+    {"id": "T7",  "name": "Dunlop",      "lap_distance_m": 1700, "type": "fast"},
+    {"id": "T8",  "name": "Degner 1",    "lap_distance_m": 2070, "type": "fast"},
+    {"id": "T9",  "name": "Degner 2",    "lap_distance_m": 2240, "type": "medium"},
+    {"id": "T10", "name": "Hairpin",     "lap_distance_m": 2960, "type": "slow"},
+    {"id": "T11", "name": "T11",         "lap_distance_m": 3290, "type": "fast"},
+    {"id": "T12", "name": "Spoon 1",     "lap_distance_m": 3610, "type": "fast"},
+    {"id": "T13", "name": "Spoon 2",     "lap_distance_m": 3780, "type": "medium"},
+    {"id": "T14", "name": "130R",        "lap_distance_m": 4830, "type": "fast"},
+    {"id": "T15", "name": "Casio Triangle 1","lap_distance_m": 5340, "type": "slow"},
+    {"id": "T16", "name": "Casio Triangle 2","lap_distance_m": 5430, "type": "slow"},
+    {"id": "T17", "name": "T17",         "lap_distance_m": 5530, "type": "medium"},
+    {"id": "T18", "name": "T18",         "lap_distance_m": 5650, "type": "fast"}
+  ]
+}

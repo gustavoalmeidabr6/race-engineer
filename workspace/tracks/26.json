@@ -1,0 +1,21 @@
+{
+  "name": "Zandvoort",
+  "length_m": 4259,
+  "_note": "Banked corners — Tarzan T1 and Arie Luyendyk T14 are the iconic ones.",
+  "corners": [
+    {"id": "T1",  "name": "Tarzan",          "lap_distance_m": 540,  "type": "slow"},
+    {"id": "T2",  "name": "Gerlachbocht",    "lap_distance_m": 770,  "type": "fast"},
+    {"id": "T3",  "name": "Hugenholtzbocht", "lap_distance_m": 1010, "type": "medium"},
+    {"id": "T4",  "name": "Hunzerug",        "lap_distance_m": 1290, "type": "fast"},
+    {"id": "T5",  "name": "Rob Slotemaker",  "lap_distance_m": 1500, "type": "fast"},
+    {"id": "T6",  "name": "Scheivlak",       "lap_distance_m": 1740, "type": "fast"},
+    {"id": "T7",  "name": "Mastersbocht",    "lap_distance_m": 2050, "type": "medium"},
+    {"id": "T8",  "name": "T8",              "lap_distance_m": 2290, "type": "medium"},
+    {"id": "T9",  "name": "Audi-S 1",        "lap_distance_m": 2650, "type": "fast"},
+    {"id": "T10", "name": "Audi-S 2",        "lap_distance_m": 2790, "type": "medium"},
+    {"id": "T11", "name": "Kumho",           "lap_distance_m": 3020, "type": "slow"},
+    {"id": "T12", "name": "T12",             "lap_distance_m": 3340, "type": "medium"},
+    {"id": "T13", "name": "Hans Ernst",      "lap_distance_m": 3580, "type": "slow"},
+    {"id": "T14", "name": "Arie Luyendyk",   "lap_distance_m": 3940, "type": "fast"}
+  ]
+}

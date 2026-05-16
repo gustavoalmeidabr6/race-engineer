@@ -1,0 +1,21 @@
+{
+  "name": "Monaco",
+  "length_m": 3337,
+  "_note": "Monte Carlo. Distances ±30m — short track, dense corners.",
+  "corners": [
+    {"id": "T1",  "name": "Sainte Devote",  "lap_distance_m": 230,  "type": "medium"},
+    {"id": "T2",  "name": "Massenet",       "lap_distance_m": 600,  "type": "fast"},
+    {"id": "T3",  "name": "Casino",         "lap_distance_m": 720,  "type": "medium"},
+    {"id": "T4",  "name": "Mirabeau",       "lap_distance_m": 1010, "type": "slow"},
+    {"id": "T5",  "name": "Loews Hairpin",  "lap_distance_m": 1170, "type": "slow"},
+    {"id": "T6",  "name": "Portier",        "lap_distance_m": 1310, "type": "slow"},
+    {"id": "T7",  "name": "Tunnel",         "lap_distance_m": 1500, "type": "fast"},
+    {"id": "T8",  "name": "Nouvelle Chicane","lap_distance_m": 2030, "type": "slow"},
+    {"id": "T9",  "name": "Tabac",          "lap_distance_m": 2210, "type": "medium"},
+    {"id": "T10", "name": "Swimming Pool 1","lap_distance_m": 2390, "type": "fast"},
+    {"id": "T11", "name": "Swimming Pool 2","lap_distance_m": 2480, "type": "medium"},
+    {"id": "T12", "name": "Swimming Pool 3","lap_distance_m": 2580, "type": "slow"},
+    {"id": "T13", "name": "Rascasse",       "lap_distance_m": 2860, "type": "slow"},
+    {"id": "T14", "name": "Anthony Noghes", "lap_distance_m": 2970, "type": "slow"}
+  ]
+}

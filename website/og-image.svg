@@ -1,0 +1,39 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 630" font-family="Inter Tight, Inter, system-ui, sans-serif">
+  <defs>
+    <radialGradient id="g" cx="80%" cy="0%" r="60%">
+      <stop offset="0%" stop-color="#e10600" stop-opacity="0.45"/>
+      <stop offset="100%" stop-color="#0a0e14" stop-opacity="0"/>
+    </radialGradient>
+    <pattern id="grid" width="48" height="48" patternUnits="userSpaceOnUse">
+      <path d="M 48 0 L 0 0 0 48" fill="none" stroke="rgba(255,255,255,0.05)" stroke-width="1"/>
+    </pattern>
+    <pattern id="check" x="0" y="0" width="28" height="28" patternUnits="userSpaceOnUse">
+      <rect width="14" height="14" fill="#e5edf5"/>
+      <rect x="14" y="14" width="14" height="14" fill="#e5edf5"/>
+    </pattern>
+  </defs>
+
+  <rect width="1200" height="630" fill="#0a0e14"/>
+  <rect width="1200" height="630" fill="url(#grid)"/>
+  <rect width="1200" height="630" fill="url(#g)"/>
+
+  <g transform="translate(80 90)">
+    <rect width="56" height="56" rx="8" fill="url(#check)"/>
+    <text x="76" y="38" font-size="28" font-weight="800" fill="#e5edf5" letter-spacing="2">RACE ENGINEER</text>
+  </g>
+
+  <g transform="translate(80 220)">
+    <text font-size="92" font-weight="800" fill="#e5edf5" letter-spacing="-3">
+      <tspan x="0" dy="0">Your AI race engineer.</tspan>
+      <tspan x="0" dy="108" fill="#e10600">Now in your headset.</tspan>
+    </text>
+  </g>
+
+  <g transform="translate(80 520)">
+    <text font-size="28" fill="#9aa7b8" font-family="JetBrains Mono, monospace">
+      LIVE TELEMETRY · VOICE RADIO · RACE STRATEGY
+    </text>
+  </g>
+
+  <rect x="0" y="620" width="1200" height="10" fill="#e10600"/>
+</svg>

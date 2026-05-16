@@ -1,0 +1,27 @@
+{
+  "name": "COTA",
+  "length_m": 5513,
+  "_note": "Circuit of the Americas, Austin.",
+  "corners": [
+    {"id": "T1",  "name": "T1 Hilltop",   "lap_distance_m": 460,  "type": "slow"},
+    {"id": "T2",  "name": "T2",           "lap_distance_m": 700,  "type": "medium"},
+    {"id": "T3",  "name": "S Curves 1",   "lap_distance_m": 870,  "type": "fast"},
+    {"id": "T4",  "name": "S Curves 2",   "lap_distance_m": 1010, "type": "fast"},
+    {"id": "T5",  "name": "S Curves 3",   "lap_distance_m": 1150, "type": "fast"},
+    {"id": "T6",  "name": "S Curves 4",   "lap_distance_m": 1290, "type": "fast"},
+    {"id": "T7",  "name": "S Curves Exit","lap_distance_m": 1430, "type": "fast"},
+    {"id": "T8",  "name": "T8",           "lap_distance_m": 1680, "type": "medium"},
+    {"id": "T9",  "name": "T9",           "lap_distance_m": 1900, "type": "medium"},
+    {"id": "T10", "name": "T10",          "lap_distance_m": 2150, "type": "medium"},
+    {"id": "T11", "name": "T11",          "lap_distance_m": 2580, "type": "slow"},
+    {"id": "T12", "name": "T12",          "lap_distance_m": 3650, "type": "slow"},
+    {"id": "T13", "name": "T13",          "lap_distance_m": 3870, "type": "medium"},
+    {"id": "T14", "name": "T14",          "lap_distance_m": 4080, "type": "slow"},
+    {"id": "T15", "name": "T15",          "lap_distance_m": 4280, "type": "medium"},
+    {"id": "T16", "name": "Stadium 1",    "lap_distance_m": 4470, "type": "fast"},
+    {"id": "T17", "name": "Stadium 2",    "lap_distance_m": 4610, "type": "fast"},
+    {"id": "T18", "name": "Stadium 3",    "lap_distance_m": 4750, "type": "fast"},
+    {"id": "T19", "name": "T19",          "lap_distance_m": 5000, "type": "medium"},
+    {"id": "T20", "name": "T20",          "lap_distance_m": 5240, "type": "medium"}
+  ]
+}

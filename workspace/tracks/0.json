@@ -1,0 +1,23 @@
+{
+  "name": "Melbourne",
+  "length_m": 5278,
+  "_note": "Albert Park 2022+ layout. Distances ±50m.",
+  "corners": [
+    {"id": "T1", "name": "T1",          "lap_distance_m": 280,  "type": "medium"},
+    {"id": "T2", "name": "T2",          "lap_distance_m": 380,  "type": "medium"},
+    {"id": "T3", "name": "T3",          "lap_distance_m": 800,  "type": "fast"},
+    {"id": "T4", "name": "T4",          "lap_distance_m": 980,  "type": "fast"},
+    {"id": "T5", "name": "T5",          "lap_distance_m": 1180, "type": "fast"},
+    {"id": "T6", "name": "Lakeside",    "lap_distance_m": 1640, "type": "fast"},
+    {"id": "T7", "name": "Clark",       "lap_distance_m": 1860, "type": "slow"},
+    {"id": "T8", "name": "Stewart",     "lap_distance_m": 1990, "type": "slow"},
+    {"id": "T9", "name": "T9",          "lap_distance_m": 2480, "type": "fast"},
+    {"id": "T10","name": "T10",         "lap_distance_m": 2680, "type": "fast"},
+    {"id": "T11","name": "Waite",       "lap_distance_m": 3080, "type": "medium"},
+    {"id": "T12","name": "Hill",        "lap_distance_m": 3270, "type": "slow"},
+    {"id": "T13","name": "Ascari",      "lap_distance_m": 3490, "type": "fast"},
+    {"id": "T14","name": "T14",         "lap_distance_m": 4540, "type": "fast"},
+    {"id": "T15","name": "T15",         "lap_distance_m": 4760, "type": "slow"},
+    {"id": "T16","name": "T16",         "lap_distance_m": 4980, "type": "medium"}
+  ]
+}

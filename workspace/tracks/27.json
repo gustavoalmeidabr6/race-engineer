@@ -1,0 +1,21 @@
+{
+  "name": "Imola",
+  "length_m": 4909,
+  "_note": "Autodromo Enzo e Dino Ferrari. Tamburello chicane is T2-T3.",
+  "corners": [
+    {"id": "T1",  "name": "Tamburello 1",       "lap_distance_m": 590,  "type": "slow"},
+    {"id": "T2",  "name": "Tamburello 2",       "lap_distance_m": 690,  "type": "slow"},
+    {"id": "T3",  "name": "Villeneuve 1",       "lap_distance_m": 1050, "type": "slow"},
+    {"id": "T4",  "name": "Villeneuve 2",       "lap_distance_m": 1140, "type": "slow"},
+    {"id": "T5",  "name": "Tosa",               "lap_distance_m": 1620, "type": "slow"},
+    {"id": "T6",  "name": "Piratella",          "lap_distance_m": 2200, "type": "fast"},
+    {"id": "T7",  "name": "Acque Minerali 1",   "lap_distance_m": 2740, "type": "medium"},
+    {"id": "T8",  "name": "Acque Minerali 2",   "lap_distance_m": 2920, "type": "medium"},
+    {"id": "T9",  "name": "Variante Alta 1",    "lap_distance_m": 3380, "type": "slow"},
+    {"id": "T10", "name": "Variante Alta 2",    "lap_distance_m": 3470, "type": "slow"},
+    {"id": "T11", "name": "Rivazza 1",          "lap_distance_m": 3950, "type": "medium"},
+    {"id": "T12", "name": "Rivazza 2",          "lap_distance_m": 4140, "type": "slow"},
+    {"id": "T13", "name": "Variante Bassa 1",   "lap_distance_m": 4570, "type": "slow"},
+    {"id": "T14", "name": "Variante Bassa 2",   "lap_distance_m": 4670, "type": "slow"}
+  ]
+}

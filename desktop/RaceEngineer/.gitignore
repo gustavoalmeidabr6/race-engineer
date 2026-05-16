@@ -1,0 +1,11 @@
+build/bin
+node_modules
+frontend/dist
+# The Wails-produced standalone executable lives next to wails.json after
+# `wails build` and is regenerated every build — never commit it.
+/RaceEngineer
+# bin/telemetry-core is the standalone server binary that app.go pulls in
+# via //go:embed. Built by `make app` (or manually:
+# `cd telemetry-core && go build -o ../desktop/RaceEngineer/bin/telemetry-core ./cmd/server`).
+# We keep bin/ in git via .gitkeep but ignore the actual binary.
+bin/telemetry-core

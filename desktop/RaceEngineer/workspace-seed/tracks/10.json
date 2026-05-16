@@ -1,0 +1,27 @@
+{
+  "name": "Spa-Francorchamps",
+  "length_m": 7004,
+  "_note": "Long lap with sweeping straights between corner clusters.",
+  "pit_entry_m": 6800,
+  "pit_entry_side": "right",
+  "pit_lane_speed_kph": 60,
+  "corners": [
+    {"id": "T1",  "name": "La Source",       "lap_distance_m": 230,  "type": "slow"},
+    {"id": "T2",  "name": "Eau Rouge",       "lap_distance_m": 1100, "type": "fast"},
+    {"id": "T3",  "name": "Raidillon",       "lap_distance_m": 1280, "type": "fast"},
+    {"id": "T4",  "name": "Les Combes",      "lap_distance_m": 2410, "type": "slow"},
+    {"id": "T5",  "name": "Malmedy",         "lap_distance_m": 2580, "type": "medium"},
+    {"id": "T6",  "name": "Bruxelles",       "lap_distance_m": 2960, "type": "slow"},
+    {"id": "T7",  "name": "Speakers Corner", "lap_distance_m": 3240, "type": "medium"},
+    {"id": "T8",  "name": "Pouhon",          "lap_distance_m": 3680, "type": "fast"},
+    {"id": "T9",  "name": "Pouhon Exit",     "lap_distance_m": 3820, "type": "fast"},
+    {"id": "T10", "name": "Fagnes 1",        "lap_distance_m": 4280, "type": "medium"},
+    {"id": "T11", "name": "Fagnes 2",        "lap_distance_m": 4400, "type": "medium"},
+    {"id": "T12", "name": "Stavelot",        "lap_distance_m": 4690, "type": "fast"},
+    {"id": "T13", "name": "Paul Frere",      "lap_distance_m": 4930, "type": "fast"},
+    {"id": "T14", "name": "Blanchimont",     "lap_distance_m": 5860, "type": "fast"},
+    {"id": "T15", "name": "Bus Stop In",     "lap_distance_m": 6620, "type": "slow"},
+    {"id": "T16", "name": "Bus Stop Out",    "lap_distance_m": 6720, "type": "slow"},
+    {"id": "T17", "name": "Pit Straight Kink","lap_distance_m": 6890, "type": "kink"}
+  ]
+}

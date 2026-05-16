@@ -1,0 +1,24 @@
+{
+  "name": "Catalunya",
+  "length_m": 4675,
+  "_note": "Barcelona post-2023 chicane removal. Distances ±50m.",
+  "pit_entry_m": 4480,
+  "pit_entry_side": "right",
+  "pit_lane_speed_kph": 80,
+  "corners": [
+    {"id": "T1", "name": "Elf",       "lap_distance_m": 690,  "type": "medium"},
+    {"id": "T2", "name": "T2",        "lap_distance_m": 850,  "type": "slow"},
+    {"id": "T3", "name": "Renault",   "lap_distance_m": 1110, "type": "fast"},
+    {"id": "T4", "name": "Repsol",    "lap_distance_m": 1430, "type": "medium"},
+    {"id": "T5", "name": "Seat",      "lap_distance_m": 1760, "type": "slow"},
+    {"id": "T6", "name": "T6",        "lap_distance_m": 2070, "type": "medium"},
+    {"id": "T7", "name": "Wurth",     "lap_distance_m": 2370, "type": "slow"},
+    {"id": "T8", "name": "T8",        "lap_distance_m": 2570, "type": "medium"},
+    {"id": "T9", "name": "Campsa",    "lap_distance_m": 2840, "type": "fast"},
+    {"id": "T10","name": "Banc Sabadell","lap_distance_m": 3220, "type": "slow"},
+    {"id": "T11","name": "T11",       "lap_distance_m": 3490, "type": "fast"},
+    {"id": "T12","name": "T12",       "lap_distance_m": 3700, "type": "medium"},
+    {"id": "T13","name": "T13",       "lap_distance_m": 3970, "type": "fast"},
+    {"id": "T14","name": "T14",       "lap_distance_m": 4290, "type": "fast"}
+  ]
+}

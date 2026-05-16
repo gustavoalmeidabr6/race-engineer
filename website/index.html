@@ -1,0 +1,394 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Race Engineer — Your AI race engineer for F1 25</title>
+<meta name="description" content="An AI-powered race engineer for F1 25. Live telemetry analysis, voice radio comms, and strategic coaching — straight to your headset." />
+
+<meta property="og:title" content="Race Engineer — Your AI race engineer for F1 25" />
+<meta property="og:description" content="Live telemetry, voice radio, and race strategy. The pit wall, in your headset." />
+<meta property="og:type" content="website" />
+<meta property="og:image" content="og-image.svg" />
+<meta name="twitter:card" content="summary_large_image" />
+
+<link rel="icon" type="image/svg+xml" href="favicon.svg" />
+<script src="https://cdn.tailwindcss.com"></script>
+<script>
+  tailwind.config = {
+    theme: {
+      extend: {
+        colors: {
+          racered: '#e10600',
+          racered2: '#ff2a1f',
+          ink: '#0a0e14',
+          ink2: '#0f1620',
+          line: '#1c2632',
+        },
+        fontFamily: {
+          display: ['"Inter Tight"', 'ui-sans-serif', 'system-ui'],
+          body: ['Inter', 'ui-sans-serif', 'system-ui'],
+          mono: ['"JetBrains Mono"', 'ui-monospace', 'monospace'],
+        },
+      },
+    },
+  };
+</script>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Inter+Tight:wght@600;700;800&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+
+<style>
+  html { scroll-behavior: smooth; }
+  body {
+    background:
+      radial-gradient(1200px 600px at 80% -10%, rgba(225,6,0,0.18), transparent 60%),
+      radial-gradient(900px 500px at -10% 30%, rgba(225,6,0,0.08), transparent 60%),
+      #0a0e14;
+    color: #e5edf5;
+    font-family: Inter, ui-sans-serif, system-ui, sans-serif;
+  }
+  h1, h2, h3 { font-family: "Inter Tight", ui-sans-serif, system-ui, sans-serif; letter-spacing: -0.02em; }
+  .mono { font-family: "JetBrains Mono", ui-monospace, monospace; }
+
+  .checker {
+    background-image:
+      linear-gradient(45deg, #1c2632 25%, transparent 25%),
+      linear-gradient(-45deg, #1c2632 25%, transparent 25%),
+      linear-gradient(45deg, transparent 75%, #1c2632 75%),
+      linear-gradient(-45deg, transparent 75%, #1c2632 75%);
+    background-size: 14px 14px;
+    background-position: 0 0, 0 7px, 7px -7px, -7px 0;
+  }
+  .grid-bg {
+    background-image:
+      linear-gradient(rgba(255,255,255,0.04) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(255,255,255,0.04) 1px, transparent 1px);
+    background-size: 48px 48px;
+  }
+  .glow-red { box-shadow: 0 10px 40px -10px rgba(225,6,0,0.55), inset 0 1px 0 rgba(255,255,255,0.18); }
+  .card {
+    background: linear-gradient(180deg, rgba(255,255,255,0.025), rgba(255,255,255,0)) , #0f1620;
+    border: 1px solid #1c2632;
+  }
+  .card:hover { border-color: #28384a; }
+  .pill { border: 1px solid #1c2632; background: #0f1620; }
+  .btn-primary {
+    background: linear-gradient(180deg, #ff2a1f, #c60500);
+    color: white;
+  }
+  .btn-primary:hover { filter: brightness(1.08); }
+  .btn-secondary {
+    background: #0f1620;
+    border: 1px solid #28384a;
+    color: #e5edf5;
+  }
+  .btn-secondary:hover { border-color: #3a4d63; background: #131c27; }
+  .btn-disabled {
+    background: #0f1620;
+    border: 1px solid #1c2632;
+    color: #5b6b7d;
+    cursor: not-allowed;
+  }
+  .speedline {
+    height: 1px;
+    background: linear-gradient(90deg, transparent, #e10600, transparent);
+  }
+  /* Subtle reveal on scroll */
+  .reveal { opacity: 0; transform: translateY(8px); transition: opacity .6s ease, transform .6s ease; }
+  .reveal.in { opacity: 1; transform: translateY(0); }
+</style>
+</head>
+<body class="min-h-screen antialiased">
+
+<!-- NAV -->
+<header class="sticky top-0 z-40 backdrop-blur bg-ink/70 border-b border-line/70">
+  <div class="max-w-6xl mx-auto px-6 h-14 flex items-center justify-between">
+    <a href="#top" class="flex items-center gap-2 group">
+      <span class="w-6 h-6 rounded-sm checker"></span>
+      <span class="font-display font-bold tracking-tight">RACE ENGINEER</span>
+    </a>
+    <nav class="hidden md:flex items-center gap-7 text-sm text-slate-300">
+      <a href="#features" class="hover:text-white">Features</a>
+      <a href="#how" class="hover:text-white">How it works</a>
+      <a href="#download" class="hover:text-white">Download</a>
+      <a href="https://github.com/iamtushar324/race-engineer" class="hover:text-white">GitHub</a>
+    </nav>
+    <a href="#download" class="btn-primary glow-red rounded-md px-3.5 py-1.5 text-sm font-semibold">Download</a>
+  </div>
+</header>
+
+<!-- HERO -->
+<section id="top" class="relative overflow-hidden">
+  <div class="absolute inset-0 grid-bg opacity-40 pointer-events-none"></div>
+  <div class="max-w-6xl mx-auto px-6 pt-20 pb-24 md:pt-28 md:pb-32 relative">
+    <div class="flex items-center gap-3 mb-6">
+      <span class="pill rounded-full px-3 py-1 text-xs text-slate-300 mono">v0.1.0 · macOS preview</span>
+      <span class="text-xs text-slate-500">F1® 25 compatible</span>
+    </div>
+    <h1 class="text-5xl md:text-7xl font-extrabold leading-[1.02] max-w-4xl">
+      Your AI race engineer.<br />
+      <span class="text-racered">Now in your headset.</span>
+    </h1>
+    <p class="mt-6 text-lg md:text-xl text-slate-300 max-w-2xl">
+      Race Engineer reads live F1 25 telemetry, watches your stints in real time, and talks back over the radio — strategy calls, tire warnings, lap-by-lap coaching. Built like a real pit wall.
+    </p>
+
+    <div class="mt-9 flex flex-col sm:flex-row sm:items-center gap-3">
+      <a id="hero-cta" href="#download" class="btn-primary glow-red rounded-lg px-6 py-3.5 text-base font-semibold flex items-center gap-3 w-full sm:w-auto justify-center">
+        <span id="hero-cta-icon" aria-hidden="true">⬇</span>
+        <span id="hero-cta-label">Download Race Engineer</span>
+      </a>
+      <a href="https://github.com/iamtushar324/race-engineer" class="btn-secondary rounded-lg px-6 py-3.5 text-base font-semibold flex items-center gap-2 w-full sm:w-auto justify-center">
+        <svg width="18" height="18" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8a8 8 0 0 0 5.47 7.59c.4.07.55-.17.55-.38v-1.32c-2.22.48-2.69-1.07-2.69-1.07-.36-.92-.89-1.16-.89-1.16-.73-.5.06-.49.06-.49.8.06 1.22.82 1.22.82.72 1.23 1.88.88 2.34.67.07-.52.28-.88.51-1.08-1.77-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82a7.6 7.6 0 0 1 4 0c1.53-1.03 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.28.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48v2.2c0 .21.15.46.55.38A8 8 0 0 0 16 8c0-4.42-3.58-8-8-8Z"/></svg>
+        View on GitHub
+      </a>
+    </div>
+    <p id="hero-cta-sub" class="mt-4 text-sm text-slate-500"></p>
+
+    <!-- speedline -->
+    <div class="speedline mt-16"></div>
+  </div>
+</section>
+
+<!-- THREE PILLARS -->
+<section class="max-w-6xl mx-auto px-6 py-16 md:py-20">
+  <div class="grid md:grid-cols-3 gap-5">
+    <div class="card rounded-xl p-6 reveal">
+      <div class="w-9 h-9 rounded-md bg-racered/15 text-racered flex items-center justify-center mb-4 text-lg">📡</div>
+      <h3 class="text-xl font-bold">Live telemetry analysis</h3>
+      <p class="mt-2 text-slate-400 text-[15px] leading-relaxed">
+        Race Engineer listens to F1 25's UDP stream the moment you fire up a session — every channel, every car, every lap, stored locally so nothing leaves your machine.
+      </p>
+    </div>
+    <div class="card rounded-xl p-6 reveal">
+      <div class="w-9 h-9 rounded-md bg-racered/15 text-racered flex items-center justify-center mb-4 text-lg">🎙</div>
+      <h3 class="text-xl font-bold">Voice radio comms</h3>
+      <p class="mt-2 text-slate-400 text-[15px] leading-relaxed">
+        Tap a wheel button, ask anything — "How's the rear tire?", "Pit window?", "Did Hamilton just box?". Whisper transcribes, an LLM reasons, and your engineer answers in F1-grade radio chatter.
+      </p>
+    </div>
+    <div class="card rounded-xl p-6 reveal">
+      <div class="w-9 h-9 rounded-md bg-racered/15 text-racered flex items-center justify-center mb-4 text-lg">🧠</div>
+      <h3 class="text-xl font-bold">Strategic coaching</h3>
+      <p class="mt-2 text-slate-400 text-[15px] leading-relaxed">
+        A sandboxed team of specialist agents — tires, brakes, pace, strategy, weather, energy, driving — watches your race and only speaks up when it matters.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- FEATURE GRID -->
+<section id="features" class="max-w-6xl mx-auto px-6 py-16 md:py-20">
+  <div class="flex items-end justify-between gap-6 mb-10 flex-wrap">
+    <div>
+      <p class="mono text-xs uppercase tracking-widest text-racered">Under the hood</p>
+      <h2 class="text-3xl md:text-4xl font-extrabold mt-2">Built like a real pit wall</h2>
+    </div>
+    <p class="text-slate-400 max-w-md text-[15px]">
+      A Go telemetry core, a DuckDB warehouse, a React dashboard, and a team of LLM agents — all running on your machine.
+    </p>
+  </div>
+
+  <div class="grid md:grid-cols-2 lg:grid-cols-3 gap-5">
+    <div class="card rounded-xl p-5 reveal">
+      <div class="mono text-[11px] text-racered uppercase tracking-widest">01 · ingestion</div>
+      <h3 class="font-bold mt-2 text-lg">Live UDP @ 20 Hz</h3>
+      <p class="text-slate-400 text-sm mt-1.5 leading-relaxed">Every F1 25 packet parsed and streamed into DuckDB. Sub-second queries across the whole session.</p>
+    </div>
+    <div class="card rounded-xl p-5 reveal">
+      <div class="mono text-[11px] text-racered uppercase tracking-widest">02 · brain</div>
+      <h3 class="font-bold mt-2 text-lg">LLM strategy advisor</h3>
+      <p class="text-slate-400 text-sm mt-1.5 leading-relaxed">Bring your own key — Gemini, Claude, or OpenAI. Race-aware prompts with full session context.</p>
+    </div>
+    <div class="card rounded-xl p-5 reveal">
+      <div class="mono text-[11px] text-racered uppercase tracking-widest">03 · voice</div>
+      <h3 class="font-bold mt-2 text-lg">Push-to-talk radio</h3>
+      <p class="text-slate-400 text-sm mt-1.5 leading-relaxed">Whisper STT in, edge-TTS engineer voice out. Bind it to a wheel button and forget the keyboard exists.</p>
+    </div>
+    <div class="card rounded-xl p-5 reveal">
+      <div class="mono text-[11px] text-racered uppercase tracking-widest">04 · alerts</div>
+      <h3 class="font-bold mt-2 text-lg">Rule-based insights</h3>
+      <p class="text-slate-400 text-sm mt-1.5 leading-relaxed">Tire cliffs, fuel margins, damage, weather shifts, safety car — flagged the second they cross the threshold.</p>
+    </div>
+    <div class="card rounded-xl p-5 reveal">
+      <div class="mono text-[11px] text-racered uppercase tracking-widest">05 · dashboard</div>
+      <h3 class="font-bold mt-2 text-lg">Real-time UI</h3>
+      <p class="text-slate-400 text-sm mt-1.5 leading-relaxed">Tire wear, brake temps, gap to leader, fuel state, lap deltas — the same dash a real engineer stares at.</p>
+    </div>
+    <div class="card rounded-xl p-5 reveal">
+      <div class="mono text-[11px] text-racered uppercase tracking-widest">06 · agents</div>
+      <h3 class="font-bold mt-2 text-lg">Specialist team</h3>
+      <p class="text-slate-400 text-sm mt-1.5 leading-relaxed">Seven sandboxed personas — tires, brakes, pace, strategy, weather, energy, driving — each with its own playbook.</p>
+    </div>
+  </div>
+</section>
+
+<!-- HOW IT WORKS -->
+<section id="how" class="max-w-6xl mx-auto px-6 py-16 md:py-20">
+  <div class="text-center max-w-2xl mx-auto mb-12">
+    <p class="mono text-xs uppercase tracking-widest text-racered">Setup</p>
+    <h2 class="text-3xl md:text-4xl font-extrabold mt-2">Three steps to your pit wall</h2>
+    <p class="mt-3 text-slate-400">From download to "Box, box, box" in under five minutes.</p>
+  </div>
+
+  <ol class="grid md:grid-cols-3 gap-5">
+    <li class="card rounded-xl p-6 relative reveal">
+      <div class="mono text-racered text-sm">STEP 01</div>
+      <h3 class="text-lg font-bold mt-1">Enable F1 25 telemetry</h3>
+      <p class="text-slate-400 text-[15px] mt-2 leading-relaxed">
+        In-game: <span class="mono text-slate-300">Settings → Telemetry → UDP On</span>. Default port 20777. Nothing else to configure.
+      </p>
+    </li>
+    <li class="card rounded-xl p-6 relative reveal">
+      <div class="mono text-racered text-sm">STEP 02</div>
+      <h3 class="text-lg font-bold mt-1">Launch Race Engineer</h3>
+      <p class="text-slate-400 text-[15px] mt-2 leading-relaxed">
+        Open the app, drop in your LLM API key, hit Start. The dashboard goes live the moment you load a session.
+      </p>
+    </li>
+    <li class="card rounded-xl p-6 relative reveal">
+      <div class="mono text-racered text-sm">STEP 03</div>
+      <h3 class="text-lg font-bold mt-1">Talk to your engineer</h3>
+      <p class="text-slate-400 text-[15px] mt-2 leading-relaxed">
+        Hold your push-to-talk button, ask anything. The engineer answers over your headset and the agents start working the strategy.
+      </p>
+    </li>
+  </ol>
+</section>
+
+<!-- DOWNLOAD -->
+<section id="download" class="max-w-6xl mx-auto px-6 py-16 md:py-24">
+  <div class="card rounded-2xl p-8 md:p-12 relative overflow-hidden">
+    <div class="absolute -right-20 -top-20 w-72 h-72 rounded-full bg-racered/20 blur-3xl pointer-events-none"></div>
+    <div class="relative">
+      <p class="mono text-xs uppercase tracking-widest text-racered">Download</p>
+      <h2 class="text-3xl md:text-4xl font-extrabold mt-2">Get Race Engineer</h2>
+      <p class="mt-3 text-slate-400 max-w-2xl">
+        Free and open source under MIT. Bring your own LLM API key. macOS is live today; Windows and Linux builds are in progress.
+      </p>
+
+      <div class="mt-8 grid md:grid-cols-3 gap-4" id="download-grid">
+        <!-- macOS -->
+        <a id="dl-mac" data-os="mac" href="#" class="card rounded-xl p-5 hover:border-racered/60 transition group">
+          <div class="flex items-center justify-between">
+            <div class="text-2xl">🍎</div>
+            <span class="mono text-[10px] tracking-widest text-emerald-400 uppercase">Available</span>
+          </div>
+          <h3 class="font-bold text-lg mt-3">macOS</h3>
+          <p class="text-slate-400 text-sm mt-1">Apple silicon · .dmg</p>
+          <div class="mt-5 btn-primary rounded-md px-3 py-2 text-sm font-semibold text-center">Download for macOS</div>
+        </a>
+        <!-- Windows -->
+        <div id="dl-win" data-os="win" class="card rounded-xl p-5 opacity-80">
+          <div class="flex items-center justify-between">
+            <div class="text-2xl">🪟</div>
+            <span class="mono text-[10px] tracking-widest text-slate-500 uppercase">Coming soon</span>
+          </div>
+          <h3 class="font-bold text-lg mt-3">Windows</h3>
+          <p class="text-slate-400 text-sm mt-1">x64 · .zip</p>
+          <div class="mt-5 btn-disabled rounded-md px-3 py-2 text-sm font-semibold text-center">In progress</div>
+        </div>
+        <!-- Linux -->
+        <div id="dl-linux" data-os="linux" class="card rounded-xl p-5 opacity-80">
+          <div class="flex items-center justify-between">
+            <div class="text-2xl">🐧</div>
+            <span class="mono text-[10px] tracking-widest text-slate-500 uppercase">Coming soon</span>
+          </div>
+          <h3 class="font-bold text-lg mt-3">Linux</h3>
+          <p class="text-slate-400 text-sm mt-1">x64 · .AppImage</p>
+          <div class="mt-5 btn-disabled rounded-md px-3 py-2 text-sm font-semibold text-center">In progress</div>
+        </div>
+      </div>
+
+      <!-- Requirements -->
+      <div class="mt-10 pt-8 border-t border-line">
+        <h4 class="font-bold text-slate-200">System requirements</h4>
+        <ul class="mt-3 grid sm:grid-cols-2 gap-y-2 gap-x-6 text-sm text-slate-400">
+          <li class="flex gap-2"><span class="text-racered">›</span> F1® 25 with UDP telemetry enabled</li>
+          <li class="flex gap-2"><span class="text-racered">›</span> An LLM API key (Gemini, Claude, or OpenAI)</li>
+          <li class="flex gap-2"><span class="text-racered">›</span> ~500 MB free disk space</li>
+          <li class="flex gap-2"><span class="text-racered">›</span> Microphone (optional, for voice radio)</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- FOOTER -->
+<footer class="border-t border-line/70">
+  <div class="max-w-6xl mx-auto px-6 py-10 flex flex-col md:flex-row items-start md:items-center justify-between gap-6">
+    <div class="flex items-center gap-3">
+      <span class="w-5 h-5 rounded-sm checker"></span>
+      <div>
+        <div class="font-display font-bold">RACE ENGINEER</div>
+        <div class="text-xs text-slate-500">MIT-licensed · made for sim racers</div>
+      </div>
+    </div>
+    <div class="text-sm text-slate-400 flex items-center gap-6">
+      <a href="https://github.com/iamtushar324/race-engineer" class="hover:text-white">GitHub</a>
+      <a href="https://github.com/iamtushar324/race-engineer/blob/main/LICENSE" class="hover:text-white">License</a>
+      <span class="mono text-xs text-slate-600" id="footer-version">v0.1.0</span>
+    </div>
+  </div>
+  <div class="text-center text-[11px] text-slate-600 pb-6">
+    Not affiliated with Codemasters, EA Sports, or Formula 1. F1® is a trademark of Formula One Licensing BV.
+  </div>
+</footer>
+
+<script>
+  // ──────────────────────────────────────────────────────────────
+  // Config: GitHub Releases "latest" alias — auto-points to the
+  // newest published release. Never needs editing on each release;
+  // just publish a new release with the same asset filenames.
+  // ──────────────────────────────────────────────────────────────
+  const RELEASES_BASE = 'https://github.com/iamtushar324/race-engineer/releases/latest/download';
+  const FILES = {
+    mac:   `${RELEASES_BASE}/RaceEngineer-macos-arm64.dmg`,
+    win:   `${RELEASES_BASE}/RaceEngineer-windows-x64.zip`,
+    linux: `${RELEASES_BASE}/RaceEngineer-linux-x64.AppImage`,
+  };
+  const LABELS = { mac: 'macOS', win: 'Windows', linux: 'Linux' };
+
+  // Wire macOS link (only live download today)
+  document.getElementById('dl-mac').href = FILES.mac;
+
+  // Detect platform → personalize hero CTA
+  function detectOS() {
+    const ua = (navigator.userAgent + ' ' + (navigator.platform || '')).toLowerCase();
+    if (ua.includes('mac')) return 'mac';
+    if (ua.includes('win')) return 'win';
+    if (ua.includes('linux') || ua.includes('x11')) return 'linux';
+    return null;
+  }
+  const os = detectOS();
+  const heroLabel = document.getElementById('hero-cta-label');
+  const heroSub = document.getElementById('hero-cta-sub');
+  if (os === 'mac') {
+    heroLabel.textContent = 'Download for macOS';
+    heroSub.textContent = 'Apple silicon · ~80 MB · macOS 13+';
+    document.getElementById('hero-cta').href = FILES.mac;
+  } else if (os === 'win') {
+    heroLabel.textContent = 'Windows build coming soon';
+    heroSub.textContent = 'macOS is live today — Windows is in progress. Star the repo to get notified.';
+  } else if (os === 'linux') {
+    heroLabel.textContent = 'Linux build coming soon';
+    heroSub.textContent = 'macOS is live today — Linux is in progress. Star the repo to get notified.';
+  } else {
+    heroLabel.textContent = 'See downloads';
+    heroSub.textContent = '';
+  }
+
+  // Reveal-on-scroll
+  const io = new IntersectionObserver((entries) => {
+    for (const e of entries) {
+      if (e.isIntersecting) {
+        e.target.classList.add('in');
+        io.unobserve(e.target);
+      }
+    }
+  }, { threshold: 0.12 });
+  document.querySelectorAll('.reveal').forEach((el) => io.observe(el));
+</script>
+</body>
+</html>
