@@ -69,6 +69,14 @@ type RaceStateView struct {
 	PitWindowLatest uint8  `json:"pit_window_latest_lap"`
 
 	PlayerCarIndex uint8 `json:"player_car_index"`
+
+	// Race-lifecycle derived fields (race sessions only). Phase moves through
+	// grid → formation → lights_out → racing → final_lap → finished. Zero
+	// values for non-race sessions or before the first telemetry packet.
+	Phase               string `json:"phase"`
+	LapsRemaining       int    `json:"laps_remaining"`
+	RaceFinished        bool   `json:"race_finished"`
+	FinalClassification uint8  `json:"final_classification,omitempty"`
 }
 
 func raceStateHandler(deps *Deps) fiber.Handler {
@@ -110,6 +118,11 @@ func buildRaceStateView(s *models.RaceState) RaceStateView {
 		PlayerCarIndex:     s.PlayerCarIndex,
 	}
 
+	v.Phase = string(s.Phase())
+	v.LapsRemaining = s.LapsRemaining()
+	v.RaceFinished = s.RaceFinished
+	v.FinalClassification = s.FinalClassification
+
 	if s.TrackLength > 0 {
 		v.LapPercentage = round1(float64(s.LapDistance) / float64(s.TrackLength) * 100.0)
 	}
@@ -144,6 +157,124 @@ func composeRaceHeadline(v *RaceStateView, s *models.RaceState) string {
 		parts = append(parts, fmt.Sprintf("rain %d%%", v.RainPercent))
 	}
 	return strings.Join(parts, ", ")
+}
+
+// ─── /api/state/race_phase ───────────────────────────────────────────────
+
+// RacePhaseView is the compact race-lifecycle bundle for the pi-agent /
+// data analyst. Lets a specialist branch strategy on phase without
+// pulling the full RaceState blob.
+type RacePhaseView struct {
+	Headline            string `json:"headline"`
+	Phase               string `json:"phase"`
+	CurrentLap          uint8  `json:"current_lap"`
+	TotalLaps           uint8  `json:"total_laps"`
+	LapsRemaining       int    `json:"laps_remaining"`
+	SessionTimeLeftSec  uint16 `json:"session_time_left_sec"`
+	RaceFinished        bool   `json:"race_finished"`
+	FinalClassification uint8  `json:"final_classification,omitempty"`
+	GridPosition        uint8  `json:"grid_position"`
+	Position            uint8  `json:"position"`
+	SessionType         string `json:"session_type"`
+	SessionUID          string `json:"session_uid"`
+	// Coaching hint chosen by phase — lets a downstream consumer get the
+	// canonical one-liner without re-implementing the dispatch.
+	StrategyHint string `json:"strategy_hint"`
+}
+
+func racePhaseHandler(deps *Deps) fiber.Handler {
+	return func(c *fiber.Ctx) error {
+		s := deps.Store.Cache().Load()
+		if s == nil {
+			return cacheUnavailable(c)
+		}
+		return c.JSON(buildRacePhaseView(s))
+	}
+}
+
+func buildRacePhaseView(s *models.RaceState) RacePhaseView {
+	phase := s.Phase()
+	v := RacePhaseView{
+		Phase:               string(phase),
+		CurrentLap:          s.CurrentLap,
+		TotalLaps:           s.TotalLaps,
+		LapsRemaining:       s.LapsRemaining(),
+		SessionTimeLeftSec:  s.SessionTimeLeft,
+		RaceFinished:        s.RaceFinished,
+		FinalClassification: s.FinalClassification,
+		GridPosition:        s.GridPosition,
+		Position:            s.Position,
+		SessionType:         enums.SessionType(int(s.SessionType)),
+		SessionUID:          strconv.FormatUint(s.SessionUID, 10),
+		StrategyHint:        strategyHintForPhase(phase, s),
+	}
+	v.Headline = composeRacePhaseHeadline(&v)
+	return v
+}
+
+func strategyHintForPhase(phase models.RacePhase, s *models.RaceState) string {
+	switch phase {
+	case models.PhaseGrid:
+		return "Pre-race: ONE short tone-setting line. Set the plan in five words."
+	case models.PhaseFormation:
+		return "Formation lap: weave to heat tyres, brakes on. One cue, then silent."
+	case models.PhaseLightsOut:
+		return "Lights out — one urgent line, then ~30s silence on lap 1."
+	case models.PhaseFinalLap:
+		switch {
+		case s.Position == 1:
+			return "Last lap, P1 — bring it home clean, no risks."
+		case s.Position <= 3:
+			return "Last lap, podium on the line — hold position."
+		case s.DeltaToFrontMs > 0 && s.DeltaToFrontMs < 2000:
+			return "Last lap — car ahead in reach, go for it."
+		default:
+			return "Last lap — push or protect, no save."
+		}
+	case models.PhaseFinished:
+		finalPos := s.FinalClassification
+		if finalPos == 0 {
+			finalPos = s.Position
+		}
+		switch {
+		case finalPos == 1:
+			return "RACE WIN — celebrate properly on the radio."
+		case finalPos <= 3:
+			return "PODIUM — acknowledge it before any debrief."
+		default:
+			return "Race over — lead with the honest result, one constructive note."
+		}
+	case models.PhaseRacing:
+		if rem := s.LapsRemaining(); rem > 0 && rem <= 5 {
+			return "Late race — switch from saving to pushing; damage-aware calls favour 'manage to finish'."
+		}
+		return "Race running normally."
+	default:
+		return ""
+	}
+}
+
+func composeRacePhaseHeadline(v *RacePhaseView) string {
+	switch v.Phase {
+	case string(models.PhaseFinished):
+		fp := v.FinalClassification
+		if fp == 0 {
+			fp = v.Position
+		}
+		return fmt.Sprintf("FINISHED — final P%d (started P%d)", fp, v.GridPosition)
+	case string(models.PhaseFinalLap):
+		return fmt.Sprintf("FINAL LAP — P%d, lap %d/%d", v.Position, v.CurrentLap, v.TotalLaps)
+	case string(models.PhaseLightsOut):
+		return fmt.Sprintf("LIGHTS OUT — started P%d, %d laps", v.GridPosition, v.TotalLaps)
+	case string(models.PhaseGrid):
+		return fmt.Sprintf("GRID — starting P%d, %d laps", v.GridPosition, v.TotalLaps)
+	case string(models.PhaseFormation):
+		return fmt.Sprintf("FORMATION LAP — starting P%d, %d laps", v.GridPosition, v.TotalLaps)
+	case string(models.PhaseRacing):
+		return fmt.Sprintf("RACING — lap %d/%d (%d to go), P%d", v.CurrentLap, v.TotalLaps, v.LapsRemaining, v.Position)
+	default:
+		return fmt.Sprintf("%s — %s", v.SessionType, v.Phase)
+	}
 }
 
 // ─── /api/state/tires ────────────────────────────────────────────────────
@@ -1015,6 +1146,179 @@ func eventsHandler(deps *Deps) fiber.Handler {
 		}
 		return c.JSON(out)
 	}
+}
+
+// ─── /api/state/driver_settings ──────────────────────────────────────────
+
+// DriverSettingsView exposes the driver-controllable F1 25 setup channels
+// in a form the Live agent and pi-agent setup specialist can act on.
+// "cockpit" knobs are changeable mid-stint via the wheel/MFD; "setup_screen"
+// values are only changeable in the garage or at the next pit. DRS usage
+// metrics let the analyst flag missed/late zone openings.
+type DriverSettingsView struct {
+	Headline    string                 `json:"headline"`
+	Cockpit     CockpitSettings        `json:"cockpit"`
+	SetupScreen SetupScreenSettings    `json:"setup_screen"`
+	DRS         DRSUsageView           `json:"drs"`
+	Recent      []SettingChangeEntry   `json:"recent_changes"`
+}
+
+// CockpitSettings holds the channels the driver can change mid-lap via
+// rotary switches and MFD pages. Each value carries both the raw F1 25
+// unit and a human-readable annotation so the LLM doesn't have to guess.
+type CockpitSettings struct {
+	BrakeBias        uint8   `json:"brake_bias"`         // % forward, higher = more front
+	OnThrottleDiff   uint8   `json:"on_throttle_diff"`   // diff lock 0–100, higher = more locked
+	OffThrottleDiff  uint8   `json:"off_throttle_diff"`
+	EngineBraking    uint8   `json:"engine_braking"`     // 0–100, higher = more off-throttle braking
+	ERSDeployMode    uint8   `json:"ers_deploy_mode"`
+	ERSDeployModeName string `json:"ers_deploy_mode_name"`
+	FuelMix          uint8   `json:"fuel_mix"`
+	FuelMixName      string  `json:"fuel_mix_name"`
+}
+
+// SetupScreenSettings holds garage-only values (wings + cold pressures) plus
+// the current wing damage so the analyst can flag "note for next pit"
+// recommendations without conflating them with cockpit-changeable advice.
+type SetupScreenSettings struct {
+	FrontWing             uint8       `json:"front_wing"`
+	RearWing              uint8       `json:"rear_wing"`
+	FrontWingDamagePctMax uint8       `json:"front_wing_damage_pct_max"` // max(FL, FR)
+	RearWingDamagePct     uint8       `json:"rear_wing_damage_pct"`
+	BrakePressure         uint8       `json:"brake_pressure"`
+	ColdPressurePSI       CornerFloat `json:"cold_pressure_psi"`
+	Ballast               uint8       `json:"ballast"`
+	FuelLoadKg            float64     `json:"fuel_load_kg"`
+}
+
+// DRSUsageView surfaces this-lap and last-lap DRS utilization for the
+// analyst. utilization_pct is unused_s / available_s × 100; values under
+// ~70% on a long DRS straight suggest the driver is leaving lap time on
+// the table.
+type DRSUsageView struct {
+	Allowed              bool    `json:"allowed"`
+	Active               bool    `json:"active"`
+	Fault                bool    `json:"fault"`
+	UsedThisLapSec       float64 `json:"used_this_lap_s"`
+	AvailableThisLapSec  float64 `json:"available_this_lap_s"`
+	UtilizationPctThisLap float64 `json:"utilization_pct_this_lap"`
+}
+
+// SettingChangeEntry is one row of the in-state recent-changes ring,
+// rendered chronologically oldest-first.
+type SettingChangeEntry struct {
+	SessionTime float64 `json:"session_time"`
+	Lap         uint8   `json:"lap"`
+	Channel     string  `json:"channel"`
+	From        int     `json:"from"`
+	To          int     `json:"to"`
+}
+
+func driverSettingsHandler(deps *Deps) fiber.Handler {
+	return func(c *fiber.Ctx) error {
+		s := deps.Store.Cache().Load()
+		if s == nil {
+			return cacheUnavailable(c)
+		}
+		v := buildDriverSettingsView(s)
+		return c.JSON(v)
+	}
+}
+
+func buildDriverSettingsView(s *models.RaceState) DriverSettingsView {
+	ds := s.DriverSettings
+	frontDmgMax := s.FrontLeftWingDmg
+	if s.FrontRightWingDmg > frontDmgMax {
+		frontDmgMax = s.FrontRightWingDmg
+	}
+	util := 0.0
+	if s.DRSAvailableThisLap > 0 {
+		util = round1(float64(s.DRSUsedThisLap) / float64(s.DRSAvailableThisLap) * 100.0)
+	}
+	v := DriverSettingsView{
+		Cockpit: CockpitSettings{
+			BrakeBias:         ds.BrakeBias,
+			OnThrottleDiff:    ds.OnThrottleDiff,
+			OffThrottleDiff:   ds.OffThrottleDiff,
+			EngineBraking:     ds.EngineBraking,
+			ERSDeployMode:     s.ERSDeployMode,
+			ERSDeployModeName: enums.ERSDeployMode(s.ERSDeployMode),
+			FuelMix:           s.FuelMix,
+			FuelMixName:       enums.FuelMix(s.FuelMix),
+		},
+		SetupScreen: SetupScreenSettings{
+			FrontWing:             ds.FrontWing,
+			RearWing:              ds.RearWing,
+			FrontWingDamagePctMax: frontDmgMax,
+			RearWingDamagePct:     s.RearWingDmg,
+			BrakePressure:         ds.BrakePressure,
+			ColdPressurePSI: CornerFloat{
+				FL: round1(float64(ds.FrontLeftTyrePressure)),
+				FR: round1(float64(ds.FrontRightTyrePressure)),
+				RL: round1(float64(ds.RearLeftTyrePressure)),
+				RR: round1(float64(ds.RearRightTyrePressure)),
+			},
+			Ballast:    ds.Ballast,
+			FuelLoadKg: round1(float64(ds.FuelLoad)),
+		},
+		DRS: DRSUsageView{
+			Allowed:               s.DRSAllowed > 0,
+			Active:                s.DRS > 0,
+			Fault:                 s.DRSFault > 0,
+			UsedThisLapSec:        round2(float64(s.DRSUsedThisLap)),
+			AvailableThisLapSec:   round2(float64(s.DRSAvailableThisLap)),
+			UtilizationPctThisLap: util,
+		},
+		Recent: collectRecentSettingChanges(ds),
+	}
+	v.Headline = composeSettingsHeadline(&v)
+	return v
+}
+
+// collectRecentSettingChanges materializes the ring buffer into a
+// chronological slice (oldest-first) capped at ds.RecentChangesLen.
+func collectRecentSettingChanges(ds models.DriverSettings) []SettingChangeEntry {
+	n := int(ds.RecentChangesLen)
+	if n == 0 {
+		return []SettingChangeEntry{}
+	}
+	out := make([]SettingChangeEntry, 0, n)
+	// Head points to the next write slot; oldest is at head-n (mod 8).
+	start := (int(ds.RecentChangesHead) - n + 8) % 8
+	for i := 0; i < n; i++ {
+		idx := (start + i) % 8
+		ch := ds.RecentChanges[idx]
+		out = append(out, SettingChangeEntry{
+			SessionTime: round1(float64(ch.SessionTime)),
+			Lap:         ch.Lap,
+			Channel:     ch.Channel,
+			From:        ch.From,
+			To:          ch.To,
+		})
+	}
+	return out
+}
+
+func composeSettingsHeadline(v *DriverSettingsView) string {
+	parts := []string{
+		fmt.Sprintf("BB %d%%", v.Cockpit.BrakeBias),
+		fmt.Sprintf("diff %d/%d", v.Cockpit.OnThrottleDiff, v.Cockpit.OffThrottleDiff),
+		fmt.Sprintf("EngBrk %d", v.Cockpit.EngineBraking),
+		fmt.Sprintf("ERS %s", v.Cockpit.ERSDeployModeName),
+		fmt.Sprintf("Mix %s", v.Cockpit.FuelMixName),
+	}
+	if v.DRS.AvailableThisLapSec > 0 {
+		parts = append(parts, fmt.Sprintf("DRS used %.1f/%.1fs (%.0f%%)",
+			v.DRS.UsedThisLapSec, v.DRS.AvailableThisLapSec, v.DRS.UtilizationPctThisLap))
+	}
+	if v.SetupScreen.FrontWingDamagePctMax >= 25 {
+		parts = append(parts, fmt.Sprintf("FW dmg %d%%", v.SetupScreen.FrontWingDamagePctMax))
+	}
+	if len(v.Recent) > 0 {
+		last := v.Recent[len(v.Recent)-1]
+		parts = append(parts, fmt.Sprintf("just changed %s %d→%d", last.Channel, last.From, last.To))
+	}
+	return strings.Join(parts, ", ")
 }
 
 // ─── shared helpers ──────────────────────────────────────────────────────

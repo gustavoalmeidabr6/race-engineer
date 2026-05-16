@@ -49,6 +49,19 @@ type Corner struct {
 	Type          CornerType `json:"type"`
 }
 
+// CenterlinePoint is one sample of the curated racing line for a track —
+// (lap_distance_m, world x, world z). The live-map outline endpoint and the
+// mock generator both consume this so a fresh install / mock session can
+// render the real track shape before any lap has been driven.
+//
+// Points are sorted by lap_distance_m ascending. Density is the operator's
+// choice (typically 100–300 points per lap is plenty for the map).
+type CenterlinePoint struct {
+	LapDistanceM float32 `json:"lap_distance_m"`
+	X            float32 `json:"x"`
+	Z            float32 `json:"z"`
+}
+
 // TrackInfo is the shape of one track JSON file plus a runtime-built lookup.
 type TrackInfo struct {
 	Name    string   `json:"name"`
@@ -70,8 +83,52 @@ type TrackInfo struct {
 	// for firing. Curated where known; zero otherwise.
 	PitLaneSpeedKph int `json:"pit_lane_speed_kph,omitempty"`
 
+	// Centerline is the curated racing-line trace for the live map. Empty
+	// when no centerline has been baked for this track yet — callers fall
+	// back to the recorded telemetry_hifreq trace.
+	Centerline []CenterlinePoint `json:"centerline,omitempty"`
+
 	// byID is built once at load time for O(1) FindCorner lookups.
 	byID map[string]*Corner
+}
+
+// SamplePosition linear-interpolates the centerline at a given lap_distance.
+// Returns (0, 0, false) when no centerline has been baked or the distance
+// falls outside the recorded range. Wraps distance into [0, LengthM) when
+// the track length is known so callers can pass raw lap_distance freely.
+func (t *TrackInfo) SamplePosition(lapDistanceM float32) (x, z float32, ok bool) {
+	if t == nil || len(t.Centerline) < 2 {
+		return 0, 0, false
+	}
+	d := lapDistanceM
+	if t.LengthM > 0 {
+		for d < 0 {
+			d += t.LengthM
+		}
+		for d >= t.LengthM {
+			d -= t.LengthM
+		}
+	}
+	// Linear scan — centerlines are ~200 points, cheap enough that a binary
+	// search would be premature optimisation.
+	for i := 0; i < len(t.Centerline)-1; i++ {
+		a, b := t.Centerline[i], t.Centerline[i+1]
+		if d >= a.LapDistanceM && d <= b.LapDistanceM {
+			span := b.LapDistanceM - a.LapDistanceM
+			if span <= 0 {
+				return a.X, a.Z, true
+			}
+			f := (d - a.LapDistanceM) / span
+			return a.X + (b.X-a.X)*f, a.Z + (b.Z-a.Z)*f, true
+		}
+	}
+	// Wrap segment: between last point and first point.
+	last := t.Centerline[len(t.Centerline)-1]
+	first := t.Centerline[0]
+	if d >= last.LapDistanceM || d <= first.LapDistanceM {
+		return last.X, last.Z, true
+	}
+	return 0, 0, false
 }
 
 // PitEntry returns the curated lap-distance + side for the track. ok is

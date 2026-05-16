@@ -23,6 +23,11 @@ func (e *Engine) emitGameStateEvents(state *models.RaceState, talkLevel int32) {
 	if e.bus == nil || state == nil {
 		return
 	}
+	// Race-lifecycle (lights out, final lap, race finished). Runs FIRST so
+	// the lights-out / podium events land before any tactical noise that
+	// might queue up in the same tick. Internally race-only and one-shot
+	// per session.
+	e.emitRaceLifecycle(state, talkLevel)
 	e.emitSafetyCar(state, talkLevel)
 	e.emitVSC(state, talkLevel)
 	e.emitFastestLap(state, talkLevel)
@@ -32,12 +37,25 @@ func (e *Engine) emitGameStateEvents(state *models.RaceState, talkLevel int32) {
 	// position drop preempts the slower closing-rate trend math.
 	// Both are gated to race sessions internally — they use F1 25's
 	// nominal Position field which is meaningless in P/Q.
-	// EventCarApproaching (proximity heads-up) is emitted by its own
+	// EventTrafficUpdate (proximity heads-up) is emitted by its own
 	// 1 s ProximityWatcher goroutine, not from this 5 s tick — at
 	// 5 s a fast-closing car covers the whole watch window between
 	// ticks and we never accumulate samples.
 	e.emitOvertaken(state, talkLevel)
 	e.emitClosingThreat(state, talkLevel)
+	// Silent ground-truth P3 — fires on any position delta in any
+	// session, so the Live agent's brain snapshot always reflects the
+	// current race-position number. Voicing decisions stay on Live.
+	e.emitPositionChange(state, talkLevel)
+	// Fuel: P4 voiced critical + P2 silent rate-trend context. Both are
+	// race-only and self-deduped per lap. Run after position so a fuel
+	// critical event lands on top of any position context in the same
+	// tick's dispatch order.
+	e.emitFuelCritical(state, talkLevel)
+	e.emitFuelRate(state, talkLevel)
+	// Driver-setup advisories — P3 silent. The Live agent + dashboard
+	// Comms Queue surface them; voicing is at the engineer's discretion.
+	e.emitSetupAdvice(state, talkLevel)
 }
 
 // emitSafetyCar fires when SafetyCarStatus transitions to "Full Safety Car".

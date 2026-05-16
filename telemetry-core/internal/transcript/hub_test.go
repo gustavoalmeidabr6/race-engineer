@@ -255,6 +255,36 @@ func TestHub_LoadCurrentReturnsAll(t *testing.T) {
 	}
 }
 
+func TestHub_LoadByDecimalSessionUID(t *testing.T) {
+	// Regression for the responder hitting "no events" when it round-trips
+	// the decimal session_uid from list_sessions back into get_session_history.
+	// The files on disk are sess_<hex>; resolveScope must accept decimal,
+	// bare hex, and the literal sess_<hex> form.
+	uid := uint64(0x6a4b78d9113c7037) // matches the real trace we debugged
+	h, cancel, _ := makeHub(t, &uid)
+	defer cancel()
+
+	h.Append(Event{Kind: KindEngineerSpeech, Actor: "engineer", Text: "hello"})
+	drainFor(t, h, 200*time.Millisecond)
+
+	cases := []string{
+		"7659348464966070327",     // decimal uint64 — what list_sessions emits
+		"6a4b78d9113c7037",        // bare hex
+		"6A4B78D9113C7037",        // bare hex uppercase
+		"sess_6a4b78d9113c7037",   // already a file id
+	}
+	for _, scope := range cases {
+		got, err := h.Load(scope, 0, nil, 0)
+		if err != nil {
+			t.Errorf("scope %q: %v", scope, err)
+			continue
+		}
+		if len(got) != 1 || got[0].Text != "hello" {
+			t.Errorf("scope %q wrong: %+v", scope, got)
+		}
+	}
+}
+
 func TestHub_LoadPreviousReturnsPriorSession(t *testing.T) {
 	uid := uint64(0x111)
 	h, cancel, _ := makeHub(t, &uid)

@@ -269,18 +269,18 @@ func TestEnqueueEvent_SubjectDedup(t *testing.T) {
 		t.Fatalf("ack failed: %v", err)
 	}
 
-	// Second event: car_approaching for the same car:5. Different
+	// Second event: traffic_update for the same car:5. Different
 	// DedupKey (lap+car_index), but same subject. Should be deduped.
-	second := validEvent(EventCarApproaching)
-	second.DedupKey = "car_approaching:5:14"
+	second := validEvent(EventTrafficUpdate)
+	second.DedupKey = "traffic_update:14:5:-1"
 	second.DedupSubject = "car:5"
 	if _, err := b.EnqueueEvent(second, 10); !errors.Is(err, ErrEventDeduped) {
 		t.Errorf("expected ErrEventDeduped for same-subject follow-up, got %v", err)
 	}
 
 	// Third event: same type for a DIFFERENT subject. Should pass.
-	third := validEvent(EventCarApproaching)
-	third.DedupKey = "car_approaching:7:14"
+	third := validEvent(EventTrafficUpdate)
+	third.DedupKey = "traffic_update:14:7:-1"
 	third.DedupSubject = "car:7"
 	if _, err := b.EnqueueEvent(third, 10); err != nil {
 		t.Errorf("expected different-subject event to pass, got %v", err)
@@ -303,10 +303,10 @@ func TestEnqueueEvent_ThreatCoalesce(t *testing.T) {
 		t.Fatalf("first insert: %v", err)
 	}
 
-	second := validEvent(EventCarApproaching)
+	second := validEvent(EventTrafficUpdate)
 	second.Priority = 2
 	second.Summary = "Verstappen 1.8s."
-	second.DedupKey = "car_approaching:7:14"
+	second.DedupKey = "traffic_update:14:7:-1"
 	second.DedupSubject = "car:7"
 	merged, err := b.EnqueueEvent(second, 10)
 	if err != nil {
@@ -354,9 +354,9 @@ func TestEnqueueEvent_ThreatCoalesce_OutsideWindow(t *testing.T) {
 	// Advance the clock past the coalesce window.
 	cur = cur.Add(threatCoalesceWindow + time.Second)
 
-	second := validEvent(EventCarApproaching)
+	second := validEvent(EventTrafficUpdate)
 	second.Priority = 2
-	second.DedupKey = "car_approaching:7:14"
+	second.DedupKey = "traffic_update:14:7:-1"
 	second.DedupSubject = "car:7"
 	if _, err := b.EnqueueEvent(second, 10); err != nil {
 		t.Fatalf("second insert: %v", err)
@@ -542,7 +542,7 @@ func TestLeaseTimeoutFor(t *testing.T) {
 		{EventBoxNow, 15 * time.Second},
 		{EventTireCliff, 15 * time.Second},
 		{EventPitWindowOpen, 15 * time.Second},
-		{EventCarApproaching, LeaseTimeout},
+		{EventTrafficUpdate, LeaseTimeout},
 		{EventLapSummary, LeaseTimeout},
 		{EventOvertaken, LeaseTimeout},
 	}

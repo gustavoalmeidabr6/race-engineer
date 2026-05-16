@@ -20,6 +20,17 @@ const (
 	TopicStrategyMode      Topic = "strategy.mode"
 	TopicDriverComplaint   Topic = "driver.complaint"
 	TopicDelivery          Topic = "delivery" // event-bus dropped/retried events
+
+	// Driver-controllable setup advisory topics. Written by the rule engine
+	// + pi-agent setup specialist when a current setting looks mismatched
+	// to recent driving behaviour. Topics are deliberately separate so the
+	// LLM can reason about each lever independently.
+	TopicSetupBrakeBias  Topic = "setup.brake_bias"
+	TopicSetupDiff       Topic = "setup.differential"
+	TopicSetupERSMode    Topic = "setup.ers_mode"
+	TopicSetupFuelMix    Topic = "setup.fuel_mix"
+	TopicSetupDRSUsage   Topic = "setup.drs_usage"
+	TopicSetupWingDamage Topic = "setup.wing_damage"
 )
 
 // AllTopics enumerates known topics in stable order. Snapshot serialization
@@ -40,6 +51,12 @@ var AllTopics = []Topic{
 	TopicPaceTrend,
 	TopicDriverComplaint,
 	TopicDelivery,
+	TopicSetupBrakeBias,
+	TopicSetupDiff,
+	TopicSetupERSMode,
+	TopicSetupFuelMix,
+	TopicSetupDRSUsage,
+	TopicSetupWingDamage,
 }
 
 // Known reports whether t is in the registry.

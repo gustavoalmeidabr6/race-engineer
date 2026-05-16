@@ -84,6 +84,15 @@ telemetry-core/server
 telemetry-core/query
 telemetry-core/insightlog
 
+# Frontend build output
+dashboard/dist/
+
+# Root-level runtime logs (per-session)
+logs/
+
+# LLM eval scratch
+.deepeval/
+
 # OpenCode agent workspaces
 .opencode/
 node_modules/

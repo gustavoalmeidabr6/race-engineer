@@ -282,6 +282,54 @@ type TelemetryHifreqRow struct {
 	ErsDeployMode    int
 	Clutch           int
 	SuggestedGear    int
+	BrakeBias        float64
+	DiffOnThrottle   int
+	EngineBraking    int
+	DRSAllowed       int
+	// Per-wheel sliding + surface channels. RL/RR/FL/FR ordering matches the
+	// rest of this struct; MotionEx (slip) and CarTelemetry (surface) both
+	// publish in that order.
+	WheelSlipRatioFL float64
+	WheelSlipRatioFR float64
+	WheelSlipRatioRL float64
+	WheelSlipRatioRR float64
+	WheelSlipAngleFL float64
+	WheelSlipAngleFR float64
+	WheelSlipAngleRL float64
+	WheelSlipAngleRR float64
+	SurfaceTypeFL    int
+	SurfaceTypeFR    int
+	SurfaceTypeRL    int
+	SurfaceTypeRR    int
+}
+
+// CarSetupRow matches the "car_setup" table — driver-controllable setup
+// channels from F1 25 CarSetup packet (ID 5). Player-only, low frequency.
+type CarSetupRow struct {
+	CarIndex               int
+	FrontWing              int
+	RearWing               int
+	OnThrottleDiff         int
+	OffThrottleDiff        int
+	FrontCamber            float64
+	RearCamber             float64
+	FrontToe               float64
+	RearToe                float64
+	FrontSuspension        int
+	RearSuspension         int
+	FrontAntiRollBar       int
+	RearAntiRollBar        int
+	FrontRideHeight        int
+	RearRideHeight         int
+	BrakePressure          int
+	BrakeBias              int
+	EngineBraking          int
+	RearLeftTyrePressure   float64
+	RearRightTyrePressure  float64
+	FrontLeftTyrePressure  float64
+	FrontRightTyrePressure float64
+	Ballast                int
+	FuelLoad               float64
 }
 
 // SessionHistoryRow matches the "session_history" table columns.
@@ -313,6 +361,7 @@ type BufferSet struct {
 	RaceEvents      *TableBuffer[RaceEventRow]
 	Motion          *TableBuffer[MotionRow]
 	TelemetryHifreq *TableBuffer[TelemetryHifreqRow]
+	CarSetup        *TableBuffer[CarSetupRow]
 }
 
 // NewBufferSet creates all eight table buffers wired to the given DuckDB writer
@@ -328,6 +377,7 @@ func NewBufferSet(db *sql.DB, batchSize int) *BufferSet {
 		RaceEvents:      NewTableBuffer[RaceEventRow]("race_events", batchSize, makeRaceEventFlusher(db)),
 		Motion:          NewTableBuffer[MotionRow]("motion_data", batchSize, makeMotionFlusher(db)),
 		TelemetryHifreq: NewTableBuffer[TelemetryHifreqRow]("telemetry_hifreq", batchSize, makeTelemetryHifreqFlusher(db)),
+		CarSetup:        NewTableBuffer[CarSetupRow]("car_setup", batchSize, makeCarSetupFlusher(db)),
 	}
 }
 
@@ -348,6 +398,7 @@ func (bs *BufferSet) FlushAll(ctx context.Context) error {
 	collect(bs.RaceEvents.Flush(ctx))
 	collect(bs.Motion.Flush(ctx))
 	collect(bs.TelemetryHifreq.Flush(ctx))
+	collect(bs.CarSetup.Flush(ctx))
 	return firstErr
 }
 
@@ -614,8 +665,12 @@ func makeTelemetryHifreqFlusher(db *sql.DB) func(ctx context.Context, items []Te
 			 tyre_inner_temp_fl, tyre_inner_temp_fr, tyre_inner_temp_rl, tyre_inner_temp_rr,
 			 tyre_pressure_fl, tyre_pressure_fr, tyre_pressure_rl, tyre_pressure_rr,
 			 fuel_in_tank, ers_store_energy, ers_deploy_mode,
-			 clutch, suggested_gear)
-			VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+			 clutch, suggested_gear,
+			 brake_bias, diff_on_throttle, engine_braking, drs_allowed,
+			 wheel_slip_ratio_fl, wheel_slip_ratio_fr, wheel_slip_ratio_rl, wheel_slip_ratio_rr,
+			 wheel_slip_angle_fl, wheel_slip_angle_fr, wheel_slip_angle_rl, wheel_slip_angle_rr,
+			 surface_type_fl, surface_type_fr, surface_type_rl, surface_type_rr)
+			VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
 		if err != nil {
 			return err
 		}
@@ -638,6 +693,55 @@ func makeTelemetryHifreqFlusher(db *sql.DB) func(ctx context.Context, items []Te
 				r.TyrePressureFL, r.TyrePressureFR, r.TyrePressureRL, r.TyrePressureRR,
 				r.FuelInTank, r.ErsStoreEnergy, r.ErsDeployMode,
 				r.Clutch, r.SuggestedGear,
+				r.BrakeBias, r.DiffOnThrottle, r.EngineBraking, r.DRSAllowed,
+				r.WheelSlipRatioFL, r.WheelSlipRatioFR, r.WheelSlipRatioRL, r.WheelSlipRatioRR,
+				r.WheelSlipAngleFL, r.WheelSlipAngleFR, r.WheelSlipAngleRL, r.WheelSlipAngleRR,
+				r.SurfaceTypeFL, r.SurfaceTypeFR, r.SurfaceTypeRL, r.SurfaceTypeRR,
+			); err != nil {
+				return err
+			}
+		}
+		return tx.Commit()
+	}
+}
+
+func makeCarSetupFlusher(db *sql.DB) func(ctx context.Context, items []CarSetupRow) error {
+	return func(ctx context.Context, items []CarSetupRow) error {
+		tx, err := db.BeginTx(ctx, nil)
+		if err != nil {
+			return err
+		}
+		defer tx.Rollback() //nolint:errcheck
+		stmt, err := tx.PrepareContext(ctx, `INSERT INTO car_setup
+			(car_index,
+			 front_wing, rear_wing,
+			 on_throttle_diff, off_throttle_diff,
+			 front_camber, rear_camber, front_toe, rear_toe,
+			 front_suspension, rear_suspension,
+			 front_anti_roll_bar, rear_anti_roll_bar,
+			 front_ride_height, rear_ride_height,
+			 brake_pressure, brake_bias, engine_braking,
+			 rear_left_tyre_pressure, rear_right_tyre_pressure,
+			 front_left_tyre_pressure, front_right_tyre_pressure,
+			 ballast, fuel_load)
+			VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+		if err != nil {
+			return err
+		}
+		defer stmt.Close()
+		for _, r := range items {
+			if _, err := stmt.ExecContext(ctx,
+				r.CarIndex,
+				r.FrontWing, r.RearWing,
+				r.OnThrottleDiff, r.OffThrottleDiff,
+				r.FrontCamber, r.RearCamber, r.FrontToe, r.RearToe,
+				r.FrontSuspension, r.RearSuspension,
+				r.FrontAntiRollBar, r.RearAntiRollBar,
+				r.FrontRideHeight, r.RearRideHeight,
+				r.BrakePressure, r.BrakeBias, r.EngineBraking,
+				r.RearLeftTyrePressure, r.RearRightTyrePressure,
+				r.FrontLeftTyrePressure, r.FrontRightTyrePressure,
+				r.Ballast, r.FuelLoad,
 			); err != nil {
 				return err
 			}

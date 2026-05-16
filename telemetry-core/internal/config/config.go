@@ -112,6 +112,14 @@ type Config struct {
 	TranscriptToolLimit   int // default cap on /api/transcript pulls (default 200)
 	TranscriptRetention   int // session files kept on disk (default 30)
 
+	// Audio ducking — lower external music player volumes while the
+	// engineer speaks. See internal/audio for the per-OS implementations.
+	AudioDuckingEnabled bool
+	AudioDuckingMode    string  // "duck" (lower volume) or "pause" (pause/resume the player)
+	AudioDuckingLevel   float64 // 0.0-1.0 (ignored in pause mode)
+	AudioDuckingTargets string  // comma-separated app names; empty = OS default
+	AudioDuckingTailMs  int     // tail-time after last Live audio chunk before unduck
+
 	// CornerReminderDefaultLookaheadSec is the time-before-trigger applied
 	// when set_corner_reminder omits the lookahead_seconds parameter. Bumped
 	// to 3.0s in the coaching plan — lookahead in metres is then computed
@@ -180,10 +188,10 @@ func Load() *Config {
 		LogLevel:        src.str("LOG_LEVEL", "info"),
 		WSPushRate:      src.intv("WS_PUSH_RATE", 10),
 
-		PiAgentMode:              src.str("PI_AGENT_MODE", "off"),
-		PiAgentProvider:          src.str("PI_AGENT_PROVIDER", "anthropic"),
-		PiAgentModel:             src.str("PI_AGENT_MODEL", ""),
-		PiAgentSpecialistModel:   src.str("PI_AGENT_SPECIALIST_MODEL", ""),
+		PiAgentMode:              src.str("PI_AGENT_MODE", "on"),
+		PiAgentProvider:          src.str("PI_AGENT_PROVIDER", "gemini"),
+		PiAgentModel:             src.str("PI_AGENT_MODEL", "gemini-3.1-flash-lite"),
+		PiAgentSpecialistModel:   src.str("PI_AGENT_SPECIALIST_MODEL", "gemini-3.1-flash-lite"),
 		PiAgentMaxPriority:       src.intv("PI_AGENT_MAX_PRIORITY", 3),
 		PiAgentMCPPath:           src.str("PI_AGENT_MCP_PATH", "/mcp"),
 		PiAgentTriggerTimeoutSec: src.intv("PI_AGENT_TRIGGER_TIMEOUT_SEC", 10),
@@ -191,7 +199,7 @@ func Load() *Config {
 		// VoiceMode is loaded below — it picks the voice path and also
 		// drives the legacy GeminiLiveEnabled flag so existing callers
 		// keep working without changes.
-		GeminiLiveModel:          src.str("GEMINI_LIVE_MODEL", ""),
+		GeminiLiveModel:          src.str("GEMINI_LIVE_MODEL", "gemini-3.1-flash-live-preview"),
 		GeminiLiveAnalystTimeout: src.intv("GEMINI_LIVE_ANALYST_TIMEOUT", 120),
 		EventBundleDelayMs:       src.intv("EVENT_BUNDLE_DELAY_MS", 250),
 
@@ -201,6 +209,11 @@ func Load() *Config {
 
 		CornerReminderDefaultLookaheadSec: src.floatv("CORNER_REMINDER_DEFAULT_LOOKAHEAD_SEC", 3.0),
 
+		AudioDuckingEnabled: src.boolv("AUDIO_DUCKING_ENABLED", false),
+		AudioDuckingMode:    src.str("AUDIO_DUCKING_MODE", "duck"),
+		AudioDuckingLevel:   src.floatv("AUDIO_DUCKING_LEVEL", 0.3),
+		AudioDuckingTargets: src.str("AUDIO_DUCKING_TARGETS", ""),
+		AudioDuckingTailMs:  src.intv("AUDIO_DUCKING_TAIL_MS", 800),
 	}
 
 	// Atomic-backed PTT fields — initialised after the struct literal so

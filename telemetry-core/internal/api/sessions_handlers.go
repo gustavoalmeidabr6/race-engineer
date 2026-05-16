@@ -447,26 +447,33 @@ func newLapCtx(c *fiber.Ctx, deps *Deps) *lapCtx {
 func (l *lapCtx) resolve() (*lapCtxState, error) {
 	uidParam := l.c.Query("session_uid")
 	if uidParam == "" {
-		state := l.deps.Store.Cache().Load()
-		if state == nil {
-			return nil, errors.New("no telemetry yet")
+		if state := l.deps.Store.Cache().Load(); state != nil {
+			if state.TrackLength == 0 {
+				return nil, errors.New("track length unknown — wait for first session packet")
+			}
+			return &lapCtxState{
+				sessionUID:     state.SessionUID,
+				playerCarIndex: int(state.PlayerCarIndex),
+				trackID:        int(state.TrackID),
+				trackLength:    int(state.TrackLength),
+			}, nil
 		}
-		if state.TrackLength == 0 {
-			return nil, errors.New("track length unknown — wait for first session packet")
-		}
-		return &lapCtxState{
-			sessionUID:     state.SessionUID,
-			playerCarIndex: int(state.PlayerCarIndex),
-			trackID:        int(state.TrackID),
-			trackLength:    int(state.TrackLength),
-		}, nil
+		// No live session: pick the most recent session that has telemetry on
+		// disk so /api/laps/* still answers "last race" / "where did I lose
+		// time" questions when the game is closed. Callers who specifically
+		// want live-only data should hit /api/telemetry/latest (which still
+		// 503s when the cache is empty) instead of a lap endpoint.
+		return l.fallbackToMostRecentSession()
 	}
 
 	uid, err := strconv.ParseUint(uidParam, 10, 64)
 	if err != nil {
 		return nil, fmt.Errorf("invalid session_uid: %w", err)
 	}
+	return l.resolveExplicit(uid)
+}
 
+func (l *lapCtx) resolveExplicit(uid uint64) (*lapCtxState, error) {
 	ctx, cancel := context.WithTimeout(l.c.Context(), 5*time.Second)
 	defer cancel()
 	db := l.deps.Store.Reader()
@@ -492,5 +499,56 @@ func (l *lapCtx) resolve() (*lapCtxState, error) {
 		playerCarIndex: pidx,
 		trackID:        m.TrackID,
 		trackLength:    m.TrackLength,
+	}, nil
+}
+
+// fallbackToMostRecentSession picks the session with the most recent EndTS
+// that has both a known player car index AND a non-zero track length, so the
+// resulting lapCtxState is usable for the same downstream SQL the live path
+// produces. Used when the live cache is empty and no explicit session_uid
+// was supplied.
+func (l *lapCtx) fallbackToMostRecentSession() (*lapCtxState, error) {
+	ctx, cancel := context.WithTimeout(l.c.Context(), 5*time.Second)
+	defer cancel()
+	db := l.deps.Store.Reader()
+
+	meta, err := sessionMetaByUID(ctx, db)
+	if err != nil {
+		return nil, err
+	}
+	if len(meta) == 0 {
+		return nil, errors.New("no telemetry yet")
+	}
+	players, err := playerIndexBySession(ctx, db)
+	if err != nil {
+		return nil, err
+	}
+
+	var (
+		bestUID  uint64
+		bestEnd  time.Time
+		bestMeta *sessionMeta
+	)
+	for uid, m := range meta {
+		if m == nil || m.TrackLength == 0 {
+			continue
+		}
+		if _, ok := players[uid]; !ok {
+			continue
+		}
+		if bestMeta == nil || m.EndTS.After(bestEnd) {
+			bestUID = uid
+			bestEnd = m.EndTS
+			bestMeta = m
+		}
+	}
+	if bestMeta == nil {
+		return nil, errors.New("no telemetry yet")
+	}
+	return &lapCtxState{
+		sessionUID:     bestUID,
+		playerCarIndex: players[bestUID],
+		trackID:        bestMeta.TrackID,
+		trackLength:    bestMeta.TrackLength,
 	}, nil
 }

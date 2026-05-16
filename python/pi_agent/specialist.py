@@ -80,6 +80,8 @@ class SpecialistConfig:
     persona: str
     provider: str = "anthropic"
     model: str = ""
+    base_url: str = ""
+    api_key: str = ""
     max_steps: int = DEFAULT_MAX_STEPS
 
 
@@ -92,15 +94,30 @@ class Specialist:
         allow = TOOL_ALLOW_BY_PERSONA.get(self.cfg.persona, DEFAULT_ALLOW)
         return [t for t in self.client.tools if t["name"] in allow]
 
-    async def run(self, trigger: dict[str, Any]) -> str:
+    async def run(self, trigger: dict[str, Any]) -> tuple[str, set[str]]:
+        """Execute the model loop and return (conclusion, terminals_fired).
+
+        `terminals_fired` is the set of terminal-tool names the model
+        actually called during the run (e.g. {"submit_query_answer"} or
+        {"write_observation", "push_insight"}). The planner inspects it
+        to detect query triggers that never produced an answer so it
+        can fire a fallback `submit_query_answer` before the job_id
+        dangles in /api/analyst/jobs forever.
+        """
         provider = self.cfg.provider.lower()
+        self._terminals: set[str] = set()
         if provider in ("anthropic", "claude"):
-            return await self._run_anthropic(trigger)
-        if provider == "gemini":
-            return await self._run_gemini(trigger)
-        if provider == "openai":
-            return await self._run_openai(trigger)
-        return f"unsupported provider: {self.cfg.provider}"
+            conclusion = await self._run_anthropic(trigger)
+        elif provider == "gemini":
+            conclusion = await self._run_gemini(trigger)
+        elif provider in ("openai", "custom"):
+            # "custom" speaks the OpenAI chat-completions protocol, just
+            # with a user-supplied base_url + api_key (Ollama, vLLM,
+            # LiteLLM, OpenRouter, Together, …). Same code path.
+            conclusion = await self._run_openai(trigger)
+        else:
+            conclusion = f"unsupported provider: {self.cfg.provider}"
+        return conclusion, self._terminals
 
     # ── Anthropic ────────────────────────────────────────────────────────
 
@@ -159,6 +176,7 @@ class Specialist:
             for tu in tool_uses:
                 if tu.name in TERMINAL_TOOLS:
                     terminal_fired = True
+                    self._terminals.add(tu.name)
                 try:
                     out = await self.client.call(tu.name, dict(tu.input or {}))
                 except Exception as e:
@@ -183,7 +201,7 @@ class Specialist:
             return "google-genai SDK not installed"
 
         client = genai.Client()
-        model = self.cfg.model or "gemini-2.5-flash"
+        model = self.cfg.model or "gemini-3.1-pro-preview"
         tools = [
             types.Tool(
                 function_declarations=[
@@ -226,6 +244,7 @@ class Specialist:
             for call in calls:
                 if call.name in TERMINAL_TOOLS:
                     terminal_fired = True
+                    self._terminals.add(call.name)
                 args = dict(call.args or {})
                 try:
                     out = await self.client.call(call.name, args)
@@ -250,11 +269,23 @@ class Specialist:
         except ImportError:
             return "openai SDK not installed (pip install openai)"
 
-        client = OpenAI()
+        # Custom OpenAI-compatible endpoints (Ollama, vLLM, LiteLLM,
+        # OpenRouter, Together, …) need an explicit base_url. Many local
+        # servers accept any non-empty api_key; pass a placeholder when
+        # the user left it blank so the SDK doesn't refuse to construct.
+        client_kwargs: dict[str, Any] = {}
+        if self.cfg.base_url:
+            client_kwargs["base_url"] = self.cfg.base_url
+        if self.cfg.api_key:
+            client_kwargs["api_key"] = self.cfg.api_key
+        elif self.cfg.base_url and not os.environ.get("OPENAI_API_KEY"):
+            client_kwargs["api_key"] = "sk-local"
+        client = OpenAI(**client_kwargs)
         # gpt-4o-mini is the conservative default — works with chat.completions
         # tool calling out of the box. Codex / reasoning models (gpt-5-codex,
         # o-series) can be selected explicitly via PI_AGENT_MODEL but may have
-        # narrower parameter support.
+        # narrower parameter support. Custom providers MUST specify a model
+        # since the default won't exist there.
         model = self.cfg.model or "gpt-4o-mini"
         tools = [
             {
@@ -314,6 +345,7 @@ class Specialist:
             for tc in tool_calls:
                 if tc.function.name in TERMINAL_TOOLS:
                     terminal_fired = True
+                    self._terminals.add(tc.function.name)
                 try:
                     args = json.loads(tc.function.arguments or "{}")
                 except json.JSONDecodeError:

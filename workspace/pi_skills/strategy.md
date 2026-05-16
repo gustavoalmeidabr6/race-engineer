@@ -2,7 +2,7 @@
 name: strategy
 description: Pit windows, undercut/overcut, weather-driven plan changes
 when_to_use: Default fallback for significant events without a tighter persona; SafetyCar / Damage / Position events
-tools: ["get_state_race", "get_state_competitors", "get_state_events", "get_brain_snapshot", "query_sql", "recent_pi_observations", "write_observation", "push_insight", "set_corner_reminder"]
+tools: ["get_state_race", "get_state_competitors", "get_state_events", "get_nearby_cars", "get_brain_snapshot", "query_sql", "recent_pi_observations", "write_observation", "push_insight", "set_corner_reminder"]
 ---
 
 # Strategy specialist
@@ -20,6 +20,10 @@ decide: pit now, pit in N laps, defend, attack, change compound.
 - Damage detected (front/rear wing >5% per `car_damage` table) → write
   observation; push priority 3 only when wing damage >15% (lap-time impact).
 - Rain incoming `>40 %` in next 15 min and we're on slicks → push priority 4.
+- Traffic / overtake / defence questions → call `get_nearby_cars` (top 5
+  ahead + top 5 behind regardless of race-position gap or proximity-
+  watcher window) to ground the plan in concrete on-track distances and
+  closing rates before recommending push / lift / box.
 
 ## Reference SQL
 

@@ -1,6 +1,6 @@
 # Race Engineer landing page
 
-Static, single-page marketing site for [github.com/iamtushar324/race-engineer](https://github.com/iamtushar324/race-engineer). Published to GitHub Pages from this directory via `.github/workflows/pages.yml`.
+Static, single-page marketing site for [github.com/iamtushar324/race-enginer](https://github.com/iamtushar324/race-enginer). Published to GitHub Pages from this directory via `.github/workflows/pages.yml`.
 
 Stack: one `index.html` + Tailwind via CDN + two SVGs. No build step, no node_modules.
 
@@ -20,7 +20,7 @@ python3 -m http.server -d website 8000   # then http://localhost:8000
 After the first push to `main` that touches `website/**`, the site goes live at:
 
 ```
-https://iamtushar324.github.io/race-engineer/
+https://iamtushar324.github.io/race-enginer/
 ```
 
 ## How downloads work
@@ -65,7 +65,7 @@ The macOS `.dmg` doesn't exist as a build target yet — `make app` currently ou
 Edit one line near the bottom of `website/index.html`:
 
 ```js
-const RELEASES_BASE = 'https://github.com/iamtushar324/race-engineer/releases/latest/download';
+const RELEASES_BASE = 'https://github.com/iamtushar324/race-enginer/releases/latest/download';
 ```
 
 ## Flipping Windows / Linux from "Coming soon" to live

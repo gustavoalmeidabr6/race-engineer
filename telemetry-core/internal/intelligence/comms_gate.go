@@ -346,6 +346,12 @@ func (g *CommsGate) handleDriverQuery(ctx context.Context, dq driverQuery) {
 			Meta:  map[string]any{"source": "comms_gate"},
 		})
 	}
+	// Tee the PTT-path utterance into the brain so the snapshot's
+	// "## Open Driver Questions" block surfaces it for the next Live
+	// turn (and the analyst can reason about what the driver just asked).
+	if g.brain != nil {
+		g.brain.AppendDriverUtterance(dq.text)
+	}
 
 	snap := g.snapshot()
 	if snap.HotFacts == nil {

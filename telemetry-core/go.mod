@@ -3,6 +3,7 @@ module github.com/tusharbhardwaj/race-engineer/telemetry-core
 go 1.25.5
 
 require (
+	github.com/go-ole/go-ole v1.3.0
 	github.com/gofiber/adaptor/v2 v2.2.1
 	github.com/gofiber/contrib/websocket v1.3.4
 	github.com/gofiber/fiber/v2 v2.52.12
@@ -10,8 +11,10 @@ require (
 	github.com/gorilla/websocket v1.5.3
 	github.com/marcboeker/go-duckdb v1.8.5
 	github.com/mark3labs/mcp-go v0.54.0
+	github.com/moutend/go-wca v0.3.0
 	github.com/rs/zerolog v1.34.0
 	github.com/valyala/fasthttp v1.52.0
+	golang.org/x/sys v0.44.0
 	google.golang.org/api v0.269.0
 	google.golang.org/genai v1.56.0
 )
@@ -65,7 +68,6 @@ require (
 	golang.org/x/net v0.50.0 // indirect
 	golang.org/x/oauth2 v0.35.0 // indirect
 	golang.org/x/sync v0.19.0 // indirect
-	golang.org/x/sys v0.41.0 // indirect
 	golang.org/x/telemetry v0.0.0-20260109210033-bd525da824e2 // indirect
 	golang.org/x/text v0.34.0 // indirect
 	golang.org/x/time v0.14.0 // indirect

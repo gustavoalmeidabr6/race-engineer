@@ -70,7 +70,7 @@ type RaceEvent struct {
 // Subject is an optional opaque tag (e.g. "car:5") propagated from the
 // originating Event's DedupSubject. EnqueueEvent uses it to suppress
 // follow-up events about the same subject across rule families — so the
-// closing_threat call about Charles also gates an EventCarApproaching for
+// closing_threat call about Charles also gates an EventTrafficUpdate for
 // Charles a few seconds later.
 type SpeechRecord struct {
 	At       time.Time `json:"at"`

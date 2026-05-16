@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef } from 'react';
 import type { RaceState } from '../types/telemetry';
 import type { HealthStatus } from '../types/settings';
+import type { TrackPositionDynamic } from '../types/trackPosition';
 import { API_BASE } from '../lib/constants';
 
 function getWsUrl(): string {
@@ -14,6 +15,7 @@ export function useWebSocket() {
   const [state, setState] = useState<RaceState | null>(null);
   const [connected, setConnected] = useState(false);
   const [health, setHealth] = useState<HealthStatus | null>(null);
+  const [trackPos, setTrackPos] = useState<TrackPositionDynamic | null>(null);
 
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -61,6 +63,9 @@ export function useWebSocket() {
             case 'health':
               setHealth(msg.data as HealthStatus);
               break;
+            case 'track_position':
+              setTrackPos(msg.data as TrackPositionDynamic);
+              break;
           }
           // 'insight', 'audio', 'ptt' messages are intentionally ignored —
           // engineer voice and PTT live in the Gemini Live service, not the
@@ -82,5 +87,5 @@ export function useWebSocket() {
     };
   }, []);
 
-  return { state, connected, health };
+  return { state, connected, health, trackPos };
 }

@@ -154,6 +154,25 @@ FROM telemetry WHERE car_index = $IDX ORDER BY timestamp DESC LIMIT 20
 
 ---
 
+## Phase-aware strategy
+
+Every analysis cycle starts with knowing **where in the race we are**. Read race phase from `/api/state/race_phase` (or the new `phase` / `laps_remaining` / `race_finished` fields on `/api/state/race`) and let it bias every recommendation below.
+
+| Phase | What to publish | What to avoid |
+|-------|----------------|---------------|
+| `grid` / `formation` | Track-temp + grip context, one strategic intent ("undercut window opens lap 18") | Tire wear thresholds, fuel rate (we haven't started) |
+| `lights_out` | Nothing — silent during launch | Anything — the engineer needs the comms channel clear |
+| `racing` | Standard checklist below | — |
+| `racing` with `laps_remaining ≤ 5` | **Push framing**: pace deltas, defensive gaps, fastest-lap eligibility. Damage + low laps → "manage to finish", NOT "box for nose" | Tire-saving advice, long-term degradation calls, anything saving for later |
+| `final_lap` | Only safety + result-changing calls (overtaken/being overtaken, damage about to fail). Mute coaching | Tire wear, fuel rate, pace trends — irrelevant now |
+| `finished` | Final-classification context for the engineer's debrief line (positions gained, fastest sectors, where time was lost vs winner) at P3+. Stop after one publish | Any further coaching or strategy — race is done |
+
+**Rule of thumb:** as `laps_remaining` falls below 5, every recommendation has to answer "does this change the final classification?". If no, don't publish.
+
+When `race_finished` flips true:
+- Publish ONE summary insight (`priority=3`) headlining final position vs grid + one factual takeaway. Then stop.
+- Do not publish fuel/tire/damage insights post-finish.
+
 ## Analysis Checklist (in priority order)
 
 Run these every cycle. Stop and publish immediately if you find something critical.

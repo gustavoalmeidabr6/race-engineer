@@ -70,6 +70,10 @@ type RaceBrain struct {
 	// agent dispatcher. See events.go and event_bus.go.
 	eventQueue []Event
 
+	// driverUtterances — ring of recent transcribed driver speech (Gemini
+	// Live InputTranscription + PTT path). See driver_utterances.go.
+	driverUtterances []DriverUtterance
+
 	// clock — overridable for tests
 	now func() time.Time
 }

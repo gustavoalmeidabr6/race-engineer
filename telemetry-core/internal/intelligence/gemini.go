@@ -53,7 +53,7 @@ func (g *GeminiClient) Close() {
 
 // GenerateConfig holds parameters for a generation call.
 type GenerateConfig struct {
-	Model            string       // e.g. "gemini-2.5-flash"
+	Model            string       // e.g. "gemini-3.1-pro-preview"
 	System           string       // system instruction
 	Temperature      float32      // 0.0–2.0
 	MaxTokens        int32        // max output tokens
@@ -64,7 +64,7 @@ type GenerateConfig struct {
 // DefaultConfig returns a config suitable for most race engineer prompts.
 func DefaultConfig() GenerateConfig {
 	return GenerateConfig{
-		Model:       "gemini-2.5-flash",
+		Model:       "gemini-3.1-pro-preview",
 		Temperature: 0.3,
 		MaxTokens:   500,
 	}

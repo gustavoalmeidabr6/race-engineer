@@ -115,32 +115,59 @@ func DefaultLiveTools() []*genai.Tool {
 				},
 			},
 			{
-				Name: "list_laps",
-				Description: "List completed laps in this session with lap time, sector " +
-					"splits, and valid flag. Call BEFORE get_lap_traces / get_lap_delta " +
-					"to pick which lap numbers to compare.",
+				Name: "list_sessions",
+				Description: "Last ~100 sessions on disk with track name, session type, " +
+					"date, total laps, best lap (ms), final position, and player_car_index. " +
+					"Use this to FIND a past session_uid by track / date when the driver " +
+					"asks 'compare this to my last race at Monza' or 'how does this lap " +
+					"stack up vs my best ever here'. Pass the returned session_uid into " +
+					"list_laps / get_lap_traces / get_lap_delta / compare_lap_corners " +
+					"to scope them to a historical session.",
 				ParametersJsonSchema: emptyObject(),
+			},
+			{
+				Name: "list_laps",
+				Description: "List completed laps with lap time, sector splits, and valid " +
+					"flag. Call BEFORE get_lap_traces / get_lap_delta to pick which lap " +
+					"numbers to compare. Pass session_uid (from list_sessions) to read a " +
+					"past session — when omitted the live session is used.",
+				ParametersJsonSchema: map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"session_uid": map[string]any{
+							"type":        "string",
+							"description": "Optional past session_uid (decimal, from list_sessions). When set, returns laps for that past session instead of the live one.",
+						},
+					},
+				},
 			},
 			{
 				Name: "get_lap_traces",
 				Description: "Bucketed channel arrays per lap (throttle / brake / steering " +
 					"/ speed / gear / rpm / g_lat / g_lon / brake_temp / tyre_temp / " +
-					"tyre_pressure / fuel / ers_store etc.) indexed by track distance. " +
-					"Use to overlay 1–3 laps and find where inputs differ.",
+					"tyre_pressure / fuel / ers_store / slip_ratio / slip_angle / surface " +
+					"etc.) indexed by track distance. Use to overlay 1–3 laps and find " +
+					"where inputs differ. Pass session_uid to scope to a past session, or " +
+					"suffix individual lap tokens with `@<uid>` (e.g. 'best@123,current') " +
+					"to stack laps from different sessions on one chart.",
 				ParametersJsonSchema: map[string]any{
 					"type": "object",
 					"properties": map[string]any{
 						"laps": map[string]any{
 							"type":        "string",
-							"description": "CSV of lap selectors. Tokens: integer lap numbers, 'best', 'last', 'current', 'recent:N'. Example: 'best,last' or 'best,23,24'.",
+							"description": "CSV of lap selectors. Tokens: integer lap numbers, 'best', 'last', 'current', 'recent:N'. Optional `@<session_uid>` suffix per token pulls that lap from a different session. Example: 'best,last' or 'best@9123456,current'.",
 						},
 						"channels": map[string]any{
 							"type":        "string",
-							"description": "CSV of channel ids. Choose from throttle, brake, speed, gear, steering, rpm, clutch, drs, g_lat, g_lon, g_vert, brake_temp, tyre_temp, tyre_inner_temp, tyre_pressure, brake_temp_fl/fr/rl/rr, tyre_temp_fl/fr/rl/rr, tyre_press_fl/fr/rl/rr, fuel, ers_store, ers_deploy_mode. Default: throttle,brake,speed.",
+							"description": "CSV of channel ids. throttle, brake, speed, gear, steering, rpm, clutch, drs, g_lat, g_lon, g_vert, brake_temp(+per-wheel), tyre_temp(+per-wheel + tyre_inner_temp), tyre_pressure(+per-wheel), fuel, ers_store, ers_deploy_mode, slip_ratio(+per-wheel), slip_angle(+per-wheel), surface(+per-wheel). Default: throttle,brake,speed.",
 						},
 						"buckets": map[string]any{
 							"type":        "integer",
 							"description": "Number of distance buckets across the lap (20–60). Default 40.",
+						},
+						"session_uid": map[string]any{
+							"type":        "string",
+							"description": "Optional past session_uid (decimal, from list_sessions). When set, lap-number tokens without an `@uid` suffix resolve against that session instead of the live one.",
 						},
 					},
 					"required": []string{"laps"},
@@ -150,13 +177,27 @@ func DefaultLiveTools() []*genai.Tool {
 				Name: "get_lap_delta",
 				Description: "Cumulative time delta (your_lap_elapsed_ms - reference_lap_elapsed_ms) " +
 					"at every distance bucket. The single most useful tool for locating " +
-					"WHERE on the lap time is being gained or lost.",
+					"WHERE on the lap time is being gained or lost. Cross-session capable: " +
+					"pass lap_session_uid and reference_session_uid (from list_sessions) " +
+					"to compare today's lap against your best ever at the same track.",
 				ParametersJsonSchema: map[string]any{
 					"type": "object",
 					"properties": map[string]any{
 						"lap":       map[string]any{"type": "string", "description": "Lap to analyse. 'last' or a positive integer. Default: last."},
 						"reference": map[string]any{"type": "string", "description": "Reference lap to subtract. 'best' or a positive integer. Default: best."},
 						"buckets":   map[string]any{"type": "integer", "description": "Distance buckets (20–60). Default 40."},
+						"session_uid": map[string]any{
+							"type":        "string",
+							"description": "Optional past session_uid (decimal). Scopes both lap and reference to that session unless overridden below.",
+						},
+						"lap_session_uid": map[string]any{
+							"type":        "string",
+							"description": "Optional override: pin the 'your' lap to this session_uid.",
+						},
+						"reference_session_uid": map[string]any{
+							"type":        "string",
+							"description": "Optional override: pin the reference lap to this session_uid (e.g. best lap from last race).",
+						},
 					},
 				},
 			},
@@ -164,12 +205,22 @@ func DefaultLiveTools() []*genai.Tool {
 				Name: "compare_lap_corners",
 				Description: "Per-corner brake-point, apex-speed, and exit-throttle deltas " +
 					"between a given lap and the driver's best valid lap. Curated corner " +
-					"list per track id; pass corner= to filter to one.",
+					"list per track id; pass corner= to filter to one. Pass session_uid " +
+					"to scope to a past session, or reference_session_uid to pull the " +
+					"best-lap baseline from a different session (same track required).",
 				ParametersJsonSchema: map[string]any{
 					"type": "object",
 					"properties": map[string]any{
 						"lap":    map[string]any{"type": "integer", "description": "Lap to compare against best. Default: most recent completed lap."},
 						"corner": map[string]any{"type": "string", "description": "Optional corner id to filter (e.g. 'T3'). Default: all curated corners."},
+						"session_uid": map[string]any{
+							"type":        "string",
+							"description": "Optional past session_uid (decimal). When set, both the comparison lap and its best-lap baseline come from that past session unless reference_session_uid overrides the baseline.",
+						},
+						"reference_session_uid": map[string]any{
+							"type":        "string",
+							"description": "Optional override: pin the best-lap baseline to this session_uid (e.g. all-time best at this track).",
+						},
 					},
 				},
 			},
@@ -178,6 +229,27 @@ func DefaultLiveTools() []*genai.Tool {
 			// near T8" → set_corner_reminder. The store fires reminders
 			// automatically as the driver approaches the configured
 			// distance; the model never has to repeat itself.
+			{
+				Name: "get_nearby_cars",
+				Description: "Top N cars physically ahead on track + top N behind, " +
+					"regardless of race-position gap or watcher window. Each entry has " +
+					"driver surname (when known), signed track distance in metres, " +
+					"closing rate (m/s; positive = closing on us / we are catching them), " +
+					"ETA-to-contact seconds, and a threat label (closing fast | closing | " +
+					"steady | opening | unknown). Use this whenever the driver asks " +
+					"'who's around me', before suggesting an overtake, when planning a " +
+					"defensive line, or to decide push-vs-lift based on the gap " +
+					"trajectory. Cars outside the proximity-watcher's tracked window " +
+					"return closing_mps=0, eta_sec=-1, threat='unknown' — the position " +
+					"is still authoritative.",
+				ParametersJsonSchema: map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"ahead":  map[string]any{"type": "integer", "description": "Cars ahead to return (1..15, default 5)."},
+						"behind": map[string]any{"type": "integer", "description": "Cars behind to return (1..15, default 5)."},
+					},
+				},
+			},
 			{
 				Name: "get_track_position",
 				Description: "Where the driver is on the lap RIGHT NOW: " +
@@ -261,6 +333,10 @@ func DefaultLiveTools() []*genai.Tool {
 							"type":        "integer",
 							"description": "1-5; default 3. Use 4 only for safety-critical cues.",
 						},
+						"requires_ack": map[string]any{
+							"type":        "boolean",
+							"description": "When true, the fired event is held under '## Awaiting Driver Copy' until the driver verbally acknowledges; bus re-nags after 20s. Use for safety-critical cues (pit calls, must-do strategy changes), NOT for routine corner coaching.",
+						},
 					},
 					"required": []string{"message"},
 				},
@@ -280,6 +356,134 @@ func DefaultLiveTools() []*genai.Tool {
 						"reminder_id": map[string]any{"type": "string", "description": "Reminder id returned by set_corner_reminder."},
 					},
 					"required": []string{"reminder_id"},
+				},
+			},
+			{
+				Name: "confirm_event_copy",
+				Description: "Acknowledge that the driver verbally COPIED an event listed " +
+					"under '## Awaiting Driver Copy' in the brain snapshot. Call this when the " +
+					"driver's utterance contains 'copy', 'roger', 'got it', 'yes', 'OK', " +
+					"'understood', or similar acknowledgment for the event in question. " +
+					"Removes the event from the awaiting-ack queue so the bus won't re-nag.\n\n" +
+					"event_id MUST come from the snapshot's awaiting-ack list — do NOT invent " +
+					"ids. evidence_text is the driver's actual utterance (or a short quote) " +
+					"for the audit trail.",
+				ParametersJsonSchema: map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"event_id":      map[string]any{"type": "string", "description": "Event id from the Awaiting Driver Copy section."},
+						"evidence_text": map[string]any{"type": "string", "description": "Driver's actual words that constitute the copy."},
+					},
+					"required": []string{"event_id"},
+				},
+			},
+			{
+				Name: "mark_question_addressed",
+				Description: "Mark a driver utterance (from '## Open Driver Questions') as " +
+					"substantively addressed so it rotates out of the open-questions list on " +
+					"the next snapshot. Call this AFTER you've answered the driver's question " +
+					"on the radio, or after you've dispatched the analyst/tool call that will " +
+					"answer it shortly.",
+				ParametersJsonSchema: map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"utterance_at": map[string]any{
+							"type":        "string",
+							"description": "ISO-8601 timestamp of the utterance from the snapshot (best-effort match; nearest unaddressed within 30s wins).",
+						},
+						"summary": map[string]any{
+							"type":        "string",
+							"description": "Short note for the audit trail — what you said back, or which tool you fired.",
+						},
+					},
+				},
+			},
+			{
+				Name: "list_awaiting_ack",
+				Description: "List events currently awaiting driver acknowledgment. Mostly " +
+					"redundant with the brain snapshot, but cheap to call when you need a " +
+					"tight check before deciding whether to renag.",
+				ParametersJsonSchema: emptyObject(),
+			},
+			// Driver-controllable setup tools. Use these BEFORE suggesting a
+			// cockpit knob change so the recommendation is grounded in the
+			// driver's current state, not a guess.
+			{
+				Name: "get_driver_settings",
+				Description: "Current driver-controllable F1 setup state: cockpit-changeable " +
+					"channels (brake bias %, on/off-throttle differential, engine braking, " +
+					"ERS deploy mode, fuel mix) and setup-screen-only channels (front/rear " +
+					"wing, cold tyre pressures, ballast, fuel load). Also returns DRS " +
+					"usage this lap (used_s, available_s, utilization_pct), wing damage, " +
+					"and the last 8 setting changes (channel, from, to, lap). Use BEFORE " +
+					"recommending any setup tweak so your advice references the actual " +
+					"value. The 'cockpit' block lists what the driver can change RIGHT " +
+					"NOW via the wheel/MFD; the 'setup_screen' block lists what they'd " +
+					"need to change in the garage / at the next pit — phrase " +
+					"recommendations accordingly.",
+				ParametersJsonSchema: emptyObject(),
+			},
+			{
+				Name: "get_lap_snapshot",
+				Description: "Compact ASCII strip-chart snapshot of one lap as PLAIN TEXT " +
+					"you can read directly — throttle, brake, speed, gear, slip, DRS, " +
+					"surface, plus a delta-vs-reference strip when a reference lap is " +
+					"available. Use this when the driver asks for a 'glance' at the lap " +
+					"or when you want to localise issues visually before recommending " +
+					"a corner-specific change. Cross-session via lap_session_uid / " +
+					"reference_session_uid (chain after get_best_lap_at_track for " +
+					"'how does this lap look vs my best ever?'). Use buckets ≤ 80 for " +
+					"radio-friendly width.",
+				ParametersJsonSchema: map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"lap":       map[string]any{"type": "string", "description": "Lap to render. 'last' (default) or a positive integer."},
+						"reference": map[string]any{"type": "string", "description": "Reference lap for the delta strip. 'best' (default), 'none' to skip, or a positive integer."},
+						"width":     map[string]any{"type": "integer", "description": "Chart width in characters (40–160). Default 80."},
+						"channels":  map[string]any{"type": "string", "description": "Optional CSV from: throttle, brake, speed, gear, slip, drs, surface. Default = all."},
+						"lap_session_uid":       map[string]any{"type": "string", "description": "Optional past session_uid for the lap (decimal, from list_sessions)."},
+						"reference_session_uid": map[string]any{"type": "string", "description": "Optional past session_uid for the reference lap (decimal, from list_sessions)."},
+					},
+				},
+			},
+			{
+				Name: "get_best_lap_at_track",
+				Description: "All-time best valid lap at a given track (default: the " +
+					"current session's track). Returns session_uid + lap_num + " +
+					"lap_time_ms + session_type — chain directly into get_lap_delta " +
+					"with reference_session_uid + reference=<lap> for 'how does this " +
+					"lap stack up vs my best ever here?'.",
+				ParametersJsonSchema: map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"track_id": map[string]any{
+							"type":        "integer",
+							"description": "F1 25 track id. Omit to use the current session's track.",
+						},
+						"session_type": map[string]any{
+							"type":        "string",
+							"description": "Optional filter: 'all' (default), 'practice', 'quali', 'race', 'time_trial'.",
+						},
+					},
+				},
+			},
+			{
+				Name: "get_drs_usage",
+				Description: "Per-lap DRS analytics from telemetry_hifreq: available_s " +
+					"(seconds DRS was permitted on the lap), active_s (seconds the flap " +
+					"was actually open), utilization_pct, first_open_distance_m (where on " +
+					"track the driver first opened the flap), first_allowed_distance_m. " +
+					"Use when the driver asks about DRS timing, or when you suspect a " +
+					"missed/late zone opening is costing lap time. Utilization under ~70% " +
+					"on a long DRS straight is the canonical 'open earlier' signal.",
+				ParametersJsonSchema: map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"lap": map[string]any{
+							"type":        "string",
+							"description": "Lap selector: 'last' (default), 'best', a positive integer, or 'recent:N' for N most-recent laps.",
+						},
+					},
 				},
 			},
 		},
@@ -420,8 +624,10 @@ func HTTPToolHandler(apiBase string, analystTimeout time.Duration) ToolHandler {
 			return pushStrategyInsight(ctx, client, base, args)
 		case "get_recent_telemetry":
 			return httpGetJSON(ctx, client, base+"/api/telemetry/recent"+buildRecentTelemetryQuery(args))
+		case "list_sessions":
+			return httpGetJSON(ctx, client, base+"/api/sessions")
 		case "list_laps":
-			return httpGetJSON(ctx, client, base+"/api/laps/list")
+			return httpGetJSON(ctx, client, base+"/api/laps/list"+buildListLapsQuery(args))
 		case "get_lap_traces":
 			return httpGetJSON(ctx, client, base+"/api/laps/traces"+buildLapTraceQuery(args, 40))
 		case "get_lap_delta":
@@ -430,15 +636,182 @@ func HTTPToolHandler(apiBase string, analystTimeout time.Duration) ToolHandler {
 			return httpGetJSON(ctx, client, base+"/api/laps/compare"+buildLapCompareQuery(args))
 		case "get_track_position":
 			return httpGetJSON(ctx, client, base+"/api/state/track_position")
+		case "get_nearby_cars":
+			return httpGetJSON(ctx, client, base+"/api/state/nearby_cars"+buildNearbyCarsQuery(args))
 		case "set_reminder", "set_corner_reminder": // back-compat: old name still routes here
 			return setReminder(ctx, client, base, args)
 		case "list_reminders":
 			return httpGetJSON(ctx, client, base+"/api/reminders")
 		case "cancel_reminder":
 			return cancelReminder(ctx, client, base, args)
+		case "confirm_event_copy":
+			return confirmEventCopy(ctx, client, base, args)
+		case "mark_question_addressed":
+			return markQuestionAddressed(ctx, client, base, args)
+		case "list_awaiting_ack":
+			return httpGetJSON(ctx, client, base+"/api/events/pending")
+		case "get_driver_settings":
+			return httpGetJSON(ctx, client, base+"/api/state/driver_settings")
+		case "get_drs_usage":
+			lap, _ := args["lap"].(string)
+			lap = strings.TrimSpace(lap)
+			if lap == "" {
+				lap = "last"
+			}
+			return httpGetJSON(ctx, client, base+"/api/laps/drs_usage?lap="+url.QueryEscape(lap))
+		case "get_lap_snapshot":
+			q := url.Values{}
+			if v, ok := args["lap"].(string); ok && strings.TrimSpace(v) != "" {
+				q.Set("lap", strings.TrimSpace(v))
+			}
+			if v, ok := args["reference"].(string); ok && strings.TrimSpace(v) != "" {
+				q.Set("reference", strings.TrimSpace(v))
+			}
+			if n := intArg(args, "width", 0); n > 0 {
+				q.Set("width", strconv.Itoa(n))
+			}
+			if v, ok := args["channels"].(string); ok && strings.TrimSpace(v) != "" {
+				q.Set("channels", strings.TrimSpace(v))
+			}
+			for _, k := range []string{"lap_session_uid", "reference_session_uid"} {
+				if v, ok := args[k].(string); ok && strings.TrimSpace(v) != "" {
+					q.Set(k, strings.TrimSpace(v))
+				}
+			}
+			tail := ""
+			if len(q) > 0 {
+				tail = "?" + q.Encode()
+			}
+			return httpGetText(ctx, client, base+"/api/laps/snapshot"+tail)
+		case "get_best_lap_at_track":
+			q := url.Values{}
+			if n := intArg(args, "track_id", 0); n > 0 {
+				q.Set("track_id", strconv.Itoa(n))
+			}
+			if v, ok := args["session_type"].(string); ok && strings.TrimSpace(v) != "" {
+				q.Set("session_type", strings.TrimSpace(v))
+			}
+			tail := ""
+			if len(q) > 0 {
+				tail = "?" + q.Encode()
+			}
+			return httpGetJSON(ctx, client, base+"/api/laps/best_at_track"+tail)
 		}
 		return nil, fmt.Errorf("unknown tool %q", name)
 	}
+}
+
+// confirmEventCopy POSTs to /api/events/:id/ack with the driver-evidence
+// string. Returns the JSON body unchanged so the model sees a concrete
+// confirmation envelope (or a structured error from the server).
+//
+// On 404 ("id not in queue") — typically the model hallucinated an id
+// because the awaiting-ack section was empty — we return a structured
+// tool_result instead of a Go error, enriched with the current
+// awaiting-ack ids, so the model can self-correct mid-conversation.
+func confirmEventCopy(ctx context.Context, client *http.Client, base string, args map[string]any) (any, error) {
+	id, _ := args["event_id"].(string)
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return nil, errors.New("event_id is required")
+	}
+	evidence, _ := args["evidence_text"].(string)
+	payload, _ := json.Marshal(map[string]any{"evidence": strings.TrimSpace(evidence)})
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
+		base+"/api/events/"+url.PathEscape(id)+"/ack", strings.NewReader(string(payload)))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("confirm_event_copy: %w", err)
+	}
+	defer resp.Body.Close()
+	bodyBytes, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+	if resp.StatusCode == http.StatusNotFound {
+		result := map[string]any{
+			"ok":       false,
+			"reason":   "no event with that id is awaiting ack",
+			"event_id": id,
+			"hint":     "If the '## Awaiting Driver Copy' section is empty, do not call confirm_event_copy — the driver's acknowledgement was just radio chatter.",
+		}
+		if ids := fetchAwaitingAckIDs(ctx, client, base); ids != nil {
+			result["current_awaiting_ack_ids"] = ids
+		}
+		return result, nil
+	}
+	if resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("confirm_event_copy: %d %s", resp.StatusCode, string(bodyBytes))
+	}
+	var out any
+	if err := json.Unmarshal(bodyBytes, &out); err != nil {
+		return nil, fmt.Errorf("confirm_event_copy decode: %w", err)
+	}
+	return out, nil
+}
+
+// fetchAwaitingAckIDs pulls the current awaiting-ack ids off
+// /api/events/pending. Best-effort: returns nil on any failure so the
+// caller can omit the field rather than fail the tool result.
+func fetchAwaitingAckIDs(ctx context.Context, client *http.Client, base string) []string {
+	raw, err := httpGetJSON(ctx, client, base+"/api/events/pending")
+	if err != nil {
+		return nil
+	}
+	obj, ok := raw.(map[string]any)
+	if !ok {
+		return nil
+	}
+	list, ok := obj["awaiting_ack"].([]any)
+	if !ok {
+		return nil
+	}
+	ids := make([]string, 0, len(list))
+	for _, item := range list {
+		entry, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		if id, ok := entry["id"].(string); ok && id != "" {
+			ids = append(ids, id)
+		}
+	}
+	return ids
+}
+
+// markQuestionAddressed POSTs to /api/driver/questions/addressed with the
+// utterance timestamp + reason. The server resolves the closest matching
+// unaddressed utterance and flips it.
+func markQuestionAddressed(ctx context.Context, client *http.Client, base string, args map[string]any) (any, error) {
+	body := map[string]any{}
+	if v, ok := args["utterance_at"].(string); ok && strings.TrimSpace(v) != "" {
+		body["utterance_at"] = strings.TrimSpace(v)
+	}
+	if v, ok := args["summary"].(string); ok && strings.TrimSpace(v) != "" {
+		body["summary"] = strings.TrimSpace(v)
+	}
+	payload, _ := json.Marshal(body)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
+		base+"/api/driver/questions/addressed", strings.NewReader(string(payload)))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("mark_question_addressed: %w", err)
+	}
+	defer resp.Body.Close()
+	bodyBytes, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+	if resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("mark_question_addressed: %d %s", resp.StatusCode, string(bodyBytes))
+	}
+	var out any
+	if err := json.Unmarshal(bodyBytes, &out); err != nil {
+		return nil, fmt.Errorf("mark_question_addressed decode: %w", err)
+	}
+	return out, nil
 }
 
 // setReminder POSTs to /api/reminders/corner (kept as the legacy path; it
@@ -491,6 +864,9 @@ func setReminder(ctx context.Context, client *http.Client, base string, args map
 	}
 	if v, ok := args["recurring"].(bool); ok {
 		body["recurring"] = v
+	}
+	if v, ok := args["requires_ack"].(bool); ok {
+		body["requires_ack"] = v
 	}
 	if n := intArg(args, "expires_in_laps", 0); n > 0 {
 		body["expires_in_laps"] = n
@@ -713,6 +1089,19 @@ func intArg(args map[string]any, key string, fallback int) int {
 // Ensure url is imported even when only used in tests (linter quietener).
 var _ = url.Parse
 
+// buildListLapsQuery passes session_uid through to /api/laps/list so the
+// voice agent can list completed laps for a past session, not just live.
+func buildListLapsQuery(args map[string]any) string {
+	q := url.Values{}
+	if v, ok := args["session_uid"].(string); ok && strings.TrimSpace(v) != "" {
+		q.Set("session_uid", strings.TrimSpace(v))
+	}
+	if len(q) == 0 {
+		return ""
+	}
+	return "?" + q.Encode()
+}
+
 // buildLapTraceQuery serialises a Gemini Live tool-call's args map into the
 // query-string format /api/laps/traces expects. Empty query is fine; the
 // handler falls back to its own defaults.
@@ -726,6 +1115,9 @@ func buildLapTraceQuery(args map[string]any, defaultBuckets int) string {
 	}
 	if b := clampBuckets(intArg(args, "buckets", defaultBuckets)); b > 0 {
 		q.Set("buckets", strconv.Itoa(b))
+	}
+	if v, ok := args["session_uid"].(string); ok && strings.TrimSpace(v) != "" {
+		q.Set("session_uid", strings.TrimSpace(v))
 	}
 	if len(q) == 0 {
 		return ""
@@ -743,6 +1135,11 @@ func buildLapDeltaQuery(args map[string]any, defaultBuckets int) string {
 	}
 	if b := clampBuckets(intArg(args, "buckets", defaultBuckets)); b > 0 {
 		q.Set("buckets", strconv.Itoa(b))
+	}
+	for _, k := range []string{"session_uid", "lap_session_uid", "reference_session_uid"} {
+		if v, ok := args[k].(string); ok && strings.TrimSpace(v) != "" {
+			q.Set(k, strings.TrimSpace(v))
+		}
 	}
 	if len(q) == 0 {
 		return ""
@@ -764,6 +1161,33 @@ func buildRecentTelemetryQuery(args map[string]any) string {
 	return "?" + q.Encode()
 }
 
+// buildNearbyCarsQuery clamps ahead/behind to the handler-accepted range
+// (1..15) and emits the query string for /api/state/nearby_cars. Empty
+// returns let the handler apply its own defaults (5 / 5).
+func buildNearbyCarsQuery(args map[string]any) string {
+	q := url.Values{}
+	if n := intArg(args, "ahead", 0); n > 0 {
+		q.Set("ahead", strconv.Itoa(clampNearbyArg(n)))
+	}
+	if n := intArg(args, "behind", 0); n > 0 {
+		q.Set("behind", strconv.Itoa(clampNearbyArg(n)))
+	}
+	if len(q) == 0 {
+		return ""
+	}
+	return "?" + q.Encode()
+}
+
+func clampNearbyArg(n int) int {
+	if n < 1 {
+		return 1
+	}
+	if n > 15 {
+		return 15
+	}
+	return n
+}
+
 func buildLapCompareQuery(args map[string]any) string {
 	q := url.Values{}
 	if n := intArg(args, "lap", 0); n > 0 {
@@ -771,6 +1195,11 @@ func buildLapCompareQuery(args map[string]any) string {
 	}
 	if v, ok := args["corner"].(string); ok && strings.TrimSpace(v) != "" {
 		q.Set("corner", v)
+	}
+	for _, k := range []string{"session_uid", "reference_session_uid"} {
+		if v, ok := args[k].(string); ok && strings.TrimSpace(v) != "" {
+			q.Set(k, strings.TrimSpace(v))
+		}
 	}
 	if len(q) == 0 {
 		return ""

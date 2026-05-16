@@ -17,22 +17,22 @@ import (
 	"github.com/tusharbhardwaj/race-engineer/telemetry-core/internal/state"
 )
 
-// proximity.go — proximity awareness + heads-up event firing.
+// proximity.go — unified traffic awareness + heads-up event firing.
 //
 // Owns two responsibilities:
 //
 //   1. Maintain a per-car sample history for every car within
 //      proximityWatchM metres of the player on track. Compute closing
-//      rates from those samples. Publish a ProximitySnapshot atomically
-//      on every tick — that snapshot powers the /api/state/proximity
-//      tool.
+//      rates AND each car's own track speed from those samples. Publish
+//      a ProximitySnapshot atomically on every tick — that snapshot
+//      powers the /api/state/proximity tool.
 //
-//   2. Fire EventCarApproaching (P2) through the brain bus when the
-//      time-to-impact (distance / closing_rate) for a car BEHIND drops
-//      below proximityFireTTISec. TTI-based firing is more natural than
-//      raw closure: a car 400 m behind closing at 50 m/s is "8 s away"
-//      whether it's behind us in practice traffic or in race-mode dirty
-//      air.
+//   2. Fire EventTrafficUpdate (P2) through the brain bus when ANY car
+//      ahead OR behind has a time-to-impact (distance / closing_rate)
+//      below proximityFireTTISec. One bundled event carries the top 5
+//      cars on each side, so the Live agent can phrase a single
+//      combined radio call ("two closing behind, slow car ahead") and
+//      the driver hears one heads-up instead of two back-to-back.
 //
 // Runs at 1 s — fast enough to catch hot-lap traffic at ~40 m/s
 // closure, slow enough that map updates aren't a CPU cost.
@@ -43,16 +43,17 @@ const (
 	// threshold so the agent's tool can see further ahead.
 	proximityWatchM = 2000.0
 
-	// Firing threshold (event-only): fire EventCarApproaching when the
-	// computed time-to-impact for a car behind drops below this.
-	proximityFireTTISec = 8.0
+	// Firing threshold (event-only): fire EventTrafficUpdate when any
+	// tracked car's TTI drops below this in either direction.
+	proximityFireTTISec = 5.0
 
 	// Don't fire if they're effectively on top of us — race-mode threat
 	// rules cover that.
 	proximityMinFireGap = 15.0
 
-	// Per-car re-arm: a tracked car must drop back beyond this before
-	// we'll fire on them again (prevents repeats while they sit close).
+	// Re-arm distance: the watcher relatches the traffic event only once
+	// every closing car (ahead or behind) has opened beyond this. Keeps
+	// us from refiring while the same drivers sit close.
 	proximityRearmM = 350.0
 
 	// Closing rate must exceed this to be considered "actively closing".
@@ -62,29 +63,38 @@ const (
 	// Per-car sample history. 12 × 1 s = 12 s of history.
 	proximitySamplesCap = 12
 
-	// Per-car cooldown: don't refire on the SAME car within this window.
+	// Watcher-level cooldown: minimum gap between two traffic_update
+	// fires. Avoids spam while the same traffic pattern lingers; a
+	// genuinely new situation can still refire after this elapses.
 	proximityRefireSec = 25
+
+	// Top-N cars per side to include in the published event payload.
+	// Five gives the LLM enough spatial context to say "three closing
+	// behind, two slow cars two corners ahead" without blowing the
+	// 1KB DebugData budget.
+	proximityEventTopN = 5
 
 	// Cars older than this in the history map (no new samples) are dropped.
 	proximityStaleSec = 5
 )
 
-// proxSample is one (timestamp, signed-on-track-distance) reading.
-// `signedM` is positive when the car is ahead of the player, negative
-// when behind.
+// proxSample is one (timestamp, signed-on-track-distance, total-distance)
+// reading. `signedM` is positive when the car is ahead of the player,
+// negative when behind. `totalM` is the car's monotonically-increasing
+// race-distance (carries lap rollovers cleanly) so we can derive each
+// car's own track speed from the sample window.
 type proxSample struct {
 	at      time.Time
 	signedM float32
+	totalM  float32
 }
 
 // proxCarHistory is the rolling-sample buffer kept for each car within
 // the watch range. Samples are appended on every tick; entries that
 // haven't been refreshed in proximityStaleSec are dropped from the map.
 type proxCarHistory struct {
-	samples    []proxSample
-	lastSeen   time.Time
-	lastFireAt time.Time // per-car cooldown anchor
-	armed      bool      // re-arm latch — false until the car drops back beyond proximityRearmM
+	samples  []proxSample
+	lastSeen time.Time
 }
 
 // NearbyCar is one car in the published ProximitySnapshot, decoded for
@@ -99,6 +109,7 @@ type NearbyCar struct {
 	ClosingMps   float32 `json:"closing_mps"`    // positive=closing on us, negative=opening
 	EtaSec       float32 `json:"eta_sec"`        // distance / closing_mps; -1 when not closing
 	Threat       string  `json:"threat"`         // "closing fast" | "closing" | "steady" | "opening" | "unknown"
+	SpeedKmh     uint16  `json:"speed_kmh"`      // derived from Δ total_distance / Δt across the sample window
 	PitStatus    string  `json:"pit_status"`
 	DriverStatus string  `json:"driver_status"`
 	LapDistanceM float32 `json:"lap_distance_m"`
@@ -116,8 +127,9 @@ type ProximitySnapshot struct {
 }
 
 // ProximityWatcher polls the live RaceState at 1 s, maintains per-car
-// distance histories, fires EventCarApproaching when TTI < threshold,
-// and publishes a ProximitySnapshot atomically for the API tool.
+// distance histories, fires EventTrafficUpdate when any tracked car's
+// TTI < threshold in either direction, and publishes a
+// ProximitySnapshot atomically for the API tool.
 type ProximityWatcher struct {
 	state     func() *models.RaceState
 	bus       *brain.RaceBrain
@@ -128,6 +140,13 @@ type ProximityWatcher struct {
 	// cars tracks per-car sample history. Lives only on the watcher
 	// goroutine — accessed in tick() only — so no mutex needed.
 	cars map[uint8]*proxCarHistory
+
+	// Single watcher-level latch for the unified traffic_update event.
+	// trafficArmed flips to false when we fire; flips back to true when
+	// every previously-closing car has opened beyond proximityRearmM.
+	// trafficLastFireAt enforces the minimum gap between fires.
+	trafficArmed      bool
+	trafficLastFireAt time.Time
 
 	// snapshot is the atomically-published view. Read by the API
 	// handler; written by tick().
@@ -145,11 +164,12 @@ func NewProximityWatcher(
 		interval = 1 * time.Second
 	}
 	return &ProximityWatcher{
-		state:     stateLoader,
-		bus:       bus,
-		talkLevel: talkLevel,
-		interval:  interval,
-		cars:      make(map[uint8]*proxCarHistory, 22),
+		state:        stateLoader,
+		bus:          bus,
+		talkLevel:    talkLevel,
+		interval:     interval,
+		cars:         make(map[uint8]*proxCarHistory, 22),
+		trafficArmed: true,
 	}
 }
 
@@ -166,6 +186,53 @@ func (w *ProximityWatcher) Snapshot() *ProximitySnapshot {
 		return nil
 	}
 	return w.snapshot.Load()
+}
+
+// LookupHistory returns the watcher's tracked motion fields
+// (closing_mps, eta_sec, threat label, sample count) for a given car
+// index by scanning the latest published snapshot. Returns ok=false
+// when the car isn't in the watcher's tracked window. Callers outside
+// the watcher goroutine MUST use this rather than touching the cars
+// map directly — the snapshot is the only thread-safe view.
+//
+// Why scan the snapshot lists instead of exposing the per-car history?
+// The snapshot pre-computes closing/eta/threat for every tracked car,
+// so distant-car enrichment in /api/state/nearby_cars is a single
+// snapshot.Load() + linear scan over ≤44 entries — no locking, no
+// duplication of the closing-rate maths.
+func (w *ProximityWatcher) LookupHistory(idx uint8) (closingMps, etaSec float32, threat string, samples int, ok bool) {
+	if w == nil {
+		return 0, -1, "unknown", 0, false
+	}
+	snap := w.snapshot.Load()
+	if snap == nil {
+		return 0, -1, "unknown", 0, false
+	}
+	for i := range snap.NearbyAhead {
+		c := &snap.NearbyAhead[i]
+		if c.CarIndex == idx {
+			return c.ClosingMps, c.EtaSec, c.Threat, sampleCountForThreat(c.Threat), true
+		}
+	}
+	for i := range snap.NearbyBehind {
+		c := &snap.NearbyBehind[i]
+		if c.CarIndex == idx {
+			return c.ClosingMps, c.EtaSec, c.Threat, sampleCountForThreat(c.Threat), true
+		}
+	}
+	return 0, -1, "unknown", 0, false
+}
+
+// sampleCountForThreat returns a minimum-sample hint derived from the
+// pre-computed Threat label. classifyThreat returns "unknown" for <2
+// samples; everything else implies ≥2. Useful for callers that want
+// to know whether the watcher had enough data to trust the closing
+// rate without re-implementing the threshold check.
+func sampleCountForThreat(threat string) int {
+	if threat == "" || threat == "unknown" {
+		return 0
+	}
+	return 2
 }
 
 // Run blocks until ctx is cancelled, polling on every tick.
@@ -235,7 +302,7 @@ func (w *ProximityWatcher) tick() {
 			hist = &proxCarHistory{}
 			w.cars[idx] = hist
 		}
-		hist.samples = append(hist.samples, proxSample{at: now, signedM: signed})
+		hist.samples = append(hist.samples, proxSample{at: now, signedM: signed, totalM: gp.TotalDistance})
 		if len(hist.samples) > proximitySamplesCap {
 			hist.samples = hist.samples[len(hist.samples)-proximitySamplesCap:]
 		}
@@ -252,24 +319,25 @@ func (w *ProximityWatcher) tick() {
 	// 3. Build snapshot + evaluate firing rule.
 	ahead := make([]NearbyCar, 0, 8)
 	behind := make([]NearbyCar, 0, 8)
-	behindCands := make([]approachCandidate, 0, 8)
-	for idx, hist := range w.cars {
+	for idx := range w.cars {
 		if !seen[idx] {
 			continue // stale, will be dropped next tick
 		}
-		nc := w.buildNearbyCar(idx, state, hist)
+		nc := w.buildNearbyCar(idx, state, w.cars[idx])
 		if nc.SignedM >= 0 {
 			ahead = append(ahead, nc)
 		} else {
 			behind = append(behind, nc)
-			behindCands = append(behindCands, approachCandidate{nc: nc, hist: hist})
 		}
 	}
-	// One coalesced fire per tick: multiple cars closing become a single
-	// bundled radio call rather than N separate events.
-	w.maybeFireGroup(now, state, behindCands)
 	sort.Slice(ahead, func(i, j int) bool { return ahead[i].DistanceM < ahead[j].DistanceM })
 	sort.Slice(behind, func(i, j int) bool { return behind[i].DistanceM < behind[j].DistanceM })
+
+	// One coalesced fire per tick covering BOTH directions: the LLM gets
+	// full spatial context (top-N ahead + top-N behind with closing rates
+	// and per-car speeds) so it can phrase a single combined radio call
+	// instead of two back-to-back ones.
+	w.maybeFireTrafficUpdate(now, state, ahead, behind)
 
 	snap := &ProximitySnapshot{
 		GeneratedAt:       now,
@@ -282,6 +350,19 @@ func (w *ProximityWatcher) tick() {
 	}
 	w.snapshot.Store(snap)
 }
+
+// SignedTrackDelta is the exported alias of signedTrackDelta for the API
+// layer that needs to compute track-aware distances without importing
+// the private helper. Behaviour is identical.
+func SignedTrackDelta(from, to, lapLen, half float32) float32 {
+	return signedTrackDelta(from, to, lapLen, half)
+}
+
+// PitStatusLabel / DriverStatusLabel expose the local label maps so
+// handlers in other packages can produce snapshot entries with the same
+// human-readable strings the proximity snapshot uses.
+func PitStatusLabel(v uint8) string    { return pitStatusLabel(v) }
+func DriverStatusLabel(v uint8) string { return driverStatusLabel(v) }
 
 // signedTrackDelta returns metres from `from` to `to` along the racing
 // line, signed (positive = forward, negative = backward) and wrapped to
@@ -367,199 +448,321 @@ func (w *ProximityWatcher) buildNearbyCar(idx uint8, raceState *models.RaceState
 		ClosingMps:   rate,
 		EtaSec:       eta,
 		Threat:       classifyThreat(rate, len(hist.samples)),
+		SpeedKmh:     carSpeedKmh(hist),
 		PitStatus:    pitStatusLabel(gp.PitStatus),
 		DriverStatus: driverStatusLabel(gp.DriverStatus),
 		LapDistanceM: gp.LapDistance,
 	}
 }
 
-// approachCandidate pairs a NearbyCar with its history entry so the
-// group-fire logic can apply per-car cooldown / arm state after deciding
-// which cars belong in the bundle.
-type approachCandidate struct {
-	nc   NearbyCar
-	hist *proxCarHistory
+// carSpeedKmh derives a tracked car's own track speed from the
+// total-distance samples. Returns 0 when fewer than 2 samples exist or
+// when the rate would overflow uint16 (sentinel for "unknown").
+func carSpeedKmh(hist *proxCarHistory) uint16 {
+	n := len(hist.samples)
+	if n < 2 {
+		return 0
+	}
+	first := hist.samples[0]
+	last := hist.samples[n-1]
+	dt := last.at.Sub(first.at).Seconds()
+	if dt <= 0 {
+		return 0
+	}
+	mps := float64(last.totalM-first.totalM) / dt
+	if mps <= 0 {
+		return 0
+	}
+	kmh := mps * 3.6
+	if kmh > 400 {
+		return 400
+	}
+	return uint16(kmh + 0.5)
 }
 
-// maybeFireGroup evaluates the eligible-to-fire subset of cars BEHIND the
-// player and, when non-empty, emits a SINGLE EventCarApproaching that
-// bundles them. The event payload carries the full list (sorted by ETA
-// ascending) so the dispatcher LLM can synthesise one radio call covering
-// every closer rather than N back-to-back per-car calls.
+// maybeFireTrafficUpdate is the unified replacement for the old
+// per-direction fire helpers. It walks the snapshot lists (already
+// sorted by absolute distance ascending), picks out cars whose TTI is
+// inside proximityFireTTISec in either direction, and — when at least
+// one car qualifies — emits a single EventTrafficUpdate carrying the
+// top-N closest cars on each side. The Live agent reads the payload
+// once and phrases a combined call, so the driver hears one heads-up
+// even when traffic is closing on both sides simultaneously.
 //
-// Per-car cooldown + re-arm bookkeeping still runs per car so the latch
-// state isn't shared across drivers. Skips the car at P+1 —
-// closing_threat.go owns that slot with a tighter gap-trend rule and a P4
-// EventThreatOvertake.
-func (w *ProximityWatcher) maybeFireGroup(now time.Time, state *models.RaceState, behind []approachCandidate) {
-	group := make([]approachCandidate, 0, len(behind))
+// Latch semantics: a single watcher-level latch (`trafficArmed`) +
+// minimum interval (`trafficLastFireAt`). The latch flips back on once
+// every previously-closing car has opened beyond proximityRearmM — that
+// keeps us from refiring while the same drivers are still hovering
+// close, but lets a genuinely new traffic situation light up promptly.
+// Skips P+1 cars behind because closing_threat.go owns that slot.
+func (w *ProximityWatcher) maybeFireTrafficUpdate(now time.Time, state *models.RaceState, ahead, behind []NearbyCar) {
+	cooldownActive := !w.trafficLastFireAt.IsZero() && now.Sub(w.trafficLastFireAt) < proximityRefireSec*time.Second
+
+	// Collect firing-window cars on each side (TTI inside threshold,
+	// distance inside fire band, actively closing). Behind-side skips
+	// P+1 — closing_threat.go owns that slot with a tighter rule.
+	firingBehind := make([]NearbyCar, 0, len(behind))
 	for _, c := range behind {
-		if state != nil && state.Position > 0 && c.nc.Position == state.Position+1 {
-			// closing_threat.go owns the P+1 slot. Keep re-arm running so we
-			// fire promptly if the car drops out of P+1 and is still closing.
-			if c.nc.DistanceM > proximityRearmM {
-				c.hist.armed = true
-			}
+		if state != nil && state.Position > 0 && c.Position == state.Position+1 {
 			continue
 		}
-		if c.nc.ClosingMps < proximityMinClosingMps {
-			// Not actively closing — re-arm if they've dropped back.
-			if c.nc.DistanceM > proximityRearmM {
-				c.hist.armed = true
-			}
+		if c.ClosingMps < proximityMinClosingMps {
 			continue
 		}
-		if c.nc.DistanceM < proximityMinFireGap {
-			continue // already on top of us — race-mode threat rules cover this
-		}
-		if c.nc.EtaSec < 0 || c.nc.EtaSec > proximityFireTTISec {
-			continue // not arriving in the danger window
-		}
-		// Per-car cooldown.
-		if !c.hist.lastFireAt.IsZero() && now.Sub(c.hist.lastFireAt) < proximityRefireSec*time.Second {
+		if c.DistanceM < proximityMinFireGap {
 			continue
 		}
-		// First encounter latches armed so the cooldown-only logic above
-		// handles refires after the rearm distance is crossed.
-		if !c.hist.armed && c.hist.lastFireAt.IsZero() {
-			c.hist.armed = true
-		}
-		if !c.hist.armed {
+		if c.EtaSec < 0 || c.EtaSec > proximityFireTTISec {
 			continue
 		}
-		group = append(group, c)
+		firingBehind = append(firingBehind, c)
 	}
-	if len(group) == 0 {
+	firingAhead := make([]NearbyCar, 0, len(ahead))
+	for _, c := range ahead {
+		if c.ClosingMps < proximityMinClosingMps {
+			continue
+		}
+		if c.DistanceM < proximityMinFireGap {
+			continue
+		}
+		if c.EtaSec < 0 || c.EtaSec > proximityFireTTISec {
+			continue
+		}
+		firingAhead = append(firingAhead, c)
+	}
+
+	// Re-arm: if nothing's inside the firing window AND no actively
+	// closing car is inside the rearm band, flip the latch back on.
+	if len(firingBehind) == 0 && len(firingAhead) == 0 {
+		anyHot := false
+		for _, c := range behind {
+			if c.ClosingMps >= proximityMinClosingMps && c.DistanceM <= proximityRearmM {
+				anyHot = true
+				break
+			}
+		}
+		if !anyHot {
+			for _, c := range ahead {
+				if c.ClosingMps >= proximityMinClosingMps && c.DistanceM <= proximityRearmM {
+					anyHot = true
+					break
+				}
+			}
+		}
+		if !anyHot {
+			w.trafficArmed = true
+		}
 		return
 	}
-	// Sort by ETA ascending — closest threat first in the bundle.
-	sort.Slice(group, func(i, j int) bool { return group[i].nc.EtaSec < group[j].nc.EtaSec })
 
-	// Mark per-car cooldown for ALL bundled cars before submitting to the
-	// bus. This matches the previous semantics: even if the bus rejects
-	// (subject dedup, TalkLevel), we still want to suppress immediate
-	// refire on the same group next tick — the rule will rearm via the
-	// rearm-distance latch.
-	for _, c := range group {
-		c.hist.armed = false
-		c.hist.lastFireAt = now
+	if cooldownActive || !w.trafficArmed {
+		return
 	}
 
-	ev := buildApproachingEvent(state, group)
+	ev := buildTrafficUpdateEvent(state, ahead, behind, firingAhead, firingBehind)
 	talkLevel := int32(5)
 	if w.talkLevel != nil {
 		talkLevel = w.talkLevel()
 	}
+	w.trafficArmed = false
+	w.trafficLastFireAt = now
 	if _, err := w.bus.EnqueueEvent(ev, talkLevel); err != nil {
 		if errors.Is(err, brain.ErrEventDeduped) || errors.Is(err, brain.ErrEventTalkLevel) {
-			log.Debug().Str("type", string(ev.Type)).Int("count", len(group)).Err(err).Msg("Proximity group event dropped")
+			log.Debug().Str("type", string(ev.Type)).Int("ahead", len(firingAhead)).Int("behind", len(firingBehind)).Err(err).Msg("Traffic update dropped")
 			return
 		}
-		log.Warn().Err(err).Str("type", string(ev.Type)).Int("count", len(group)).Msg("Proximity group event rejected")
+		log.Warn().Err(err).Str("type", string(ev.Type)).Int("ahead", len(firingAhead)).Int("behind", len(firingBehind)).Msg("Traffic update rejected")
 		return
 	}
-	lead := group[0].nc
 	log.Info().
-		Int("count", len(group)).
-		Uint8("lead_idx", lead.CarIndex).
-		Float32("lead_dist_m", lead.DistanceM).
-		Float32("lead_eta_sec", lead.EtaSec).
-		Msg("Proximity → car(s) approaching from behind")
+		Int("firing_behind", len(firingBehind)).
+		Int("firing_ahead", len(firingAhead)).
+		Int("snapshot_behind", len(behind)).
+		Int("snapshot_ahead", len(ahead)).
+		Msg("Proximity → traffic_update fired")
 }
 
-// buildApproachingEvent constructs a brain.Event for the given non-empty
-// group of behind-car candidates. The lead (closest ETA) car drives the
-// dedup keys and the legacy single-car DebugData fields; every car in the
-// group is also enumerated under DebugData["behind_cars"] so the
-// dispatcher LLM can address them individually.
+// buildTrafficUpdateEvent assembles the EventTrafficUpdate payload. The
+// debug_data carries up to proximityEventTopN cars on each side
+// regardless of whether they're firing — full spatial context lets the
+// Live agent describe the whole picture ("2 closing behind, 3 slower
+// cars ahead at T7"). Firing-window counts are exposed separately so
+// the model knows which subset triggered the call.
 //
-// Caller guarantees len(group) >= 1 and that group is sorted by ETA asc.
-func buildApproachingEvent(state *models.RaceState, group []approachCandidate) brain.Event {
-	lead := group[0].nc
-	label := lead.DriverName
-	if label == "" {
-		label = fmt.Sprintf("Car #%d", lead.CarIndex)
+// `ahead` / `behind` are the FULL snapshot lists (sorted by |distance|
+// ascending). `firingAhead` / `firingBehind` are the subset whose TTI
+// is inside proximityFireTTISec; len(firing*) > 0 across the two
+// guaranteed by the caller.
+func buildTrafficUpdateEvent(state *models.RaceState, ahead, behind, firingAhead, firingBehind []NearbyCar) brain.Event {
+	topAhead := ahead
+	if len(topAhead) > proximityEventTopN {
+		topAhead = topAhead[:proximityEventTopN]
 	}
-	n := len(group)
-
-	var summary, reasoning string
-	if n == 1 {
-		summary = fmt.Sprintf("%s closing — %.0fm behind, ~%.1fs to contact.", label, lead.DistanceM, lead.EtaSec)
-		reasoning = fmt.Sprintf(
-			"%s (P%d, lap %d) closing at %.1f m/s. Distance %.0fm; estimated time to crossing %.1fs at current rate. Player on %s status, %d km/h.",
-			label, lead.Position, lead.CurrentLap,
-			lead.ClosingMps, lead.DistanceM, lead.EtaSec,
-			driverStatusLabel(state.DriverStatus), state.Speed,
-		)
-	} else {
-		parts := make([]string, 0, n)
-		for _, c := range group {
-			l := c.nc.DriverName
-			if l == "" {
-				l = fmt.Sprintf("#%d", c.nc.CarIndex)
-			}
-			parts = append(parts, fmt.Sprintf("%s ~%.1fs", l, c.nc.EtaSec))
-		}
-		summary = fmt.Sprintf("%d cars closing — %s.", n, strings.Join(parts, ", "))
-		if len(summary) > brain.MaxEventSummaryChars {
-			// Fall back to a denser form that always fits.
-			summary = fmt.Sprintf("%d cars closing — lead %s ~%.1fs.", n, label, lead.EtaSec)
-			if len(summary) > brain.MaxEventSummaryChars {
-				summary = fmt.Sprintf("%d cars closing behind.", n)
-			}
-		}
-		rparts := make([]string, 0, n)
-		for _, c := range group {
-			l := c.nc.DriverName
-			if l == "" {
-				l = fmt.Sprintf("#%d", c.nc.CarIndex)
-			}
-			rparts = append(rparts, fmt.Sprintf("%s P%d %.0fm %.1fm/s ETA %.1fs", l, c.nc.Position, c.nc.DistanceM, c.nc.ClosingMps, c.nc.EtaSec))
-		}
-		reasoning = fmt.Sprintf("%d behind cars closing. ", n) + strings.Join(rparts, "; ")
-		if len(reasoning) > brain.MaxEventReasoningChars {
-			reasoning = reasoning[:brain.MaxEventReasoningChars]
-		}
+	topBehind := behind
+	if len(topBehind) > proximityEventTopN {
+		topBehind = topBehind[:proximityEventTopN]
 	}
 
-	behindCars := make([]map[string]any, 0, n)
-	for _, c := range group {
-		behindCars = append(behindCars, map[string]any{
-			"car_index":   int(c.nc.CarIndex),
-			"driver":      c.nc.DriverName,
-			"position":    int(c.nc.Position),
-			"current_lap": int(c.nc.CurrentLap),
-			"distance_m":  c.nc.DistanceM,
-			"closing_mps": c.nc.ClosingMps,
-			"eta_sec":     c.nc.EtaSec,
-		})
+	leadBehindIdx := -1
+	if len(firingBehind) > 0 {
+		// Closest-by-ETA among firing behind for dedup key.
+		min := firingBehind[0]
+		for _, c := range firingBehind[1:] {
+			if c.EtaSec >= 0 && c.EtaSec < min.EtaSec {
+				min = c
+			}
+		}
+		leadBehindIdx = int(min.CarIndex)
+	}
+	leadAheadIdx := -1
+	if len(firingAhead) > 0 {
+		min := firingAhead[0]
+		for _, c := range firingAhead[1:] {
+			if c.EtaSec >= 0 && c.EtaSec < min.EtaSec {
+				min = c
+			}
+		}
+		leadAheadIdx = int(min.CarIndex)
+	}
+
+	summary := buildTrafficSummary(firingAhead, firingBehind)
+	reasoning := buildTrafficReasoning(firingAhead, firingBehind)
+
+	behindCars := make([]map[string]any, 0, len(topBehind))
+	for _, c := range topBehind {
+		behindCars = append(behindCars, nearbyCarToMap(c))
+	}
+	aheadCars := make([]map[string]any, 0, len(topAhead))
+	for _, c := range topAhead {
+		aheadCars = append(aheadCars, nearbyCarToMap(c))
 	}
 
 	return brain.Event{
-		Type:     brain.EventCarApproaching,
-		Priority: brain.DefaultEventPriority(brain.EventCarApproaching),
-		Summary:  summary,
+		Type:      brain.EventTrafficUpdate,
+		Priority:  brain.DefaultEventPriority(brain.EventTrafficUpdate),
+		Summary:   summary,
 		Reasoning: reasoning,
 		DebugData: map[string]any{
-			// Legacy single-car fields — refer to the closest (lead) car.
-			"behind_car_index": int(lead.CarIndex),
-			"behind_driver":    lead.DriverName,
-			"behind_position":  int(lead.Position),
-			"distance_m":       lead.DistanceM,
-			"closing_mps":      lead.ClosingMps,
-			"eta_sec":          lead.EtaSec,
-			// Group payload.
-			"behind_count": n,
-			"behind_cars":  behindCars,
-			// Common.
-			"session_type": int(state.SessionType),
-			"speed_kmh":    int(state.Speed),
+			"behind_count":     len(firingBehind),
+			"ahead_count":      len(firingAhead),
+			"behind_cars":      behindCars,
+			"ahead_cars":       aheadCars,
+			"session_type":     int(state.SessionType),
+			"player_position":  int(state.Position),
+			"player_speed_kmh": int(state.Speed),
 		},
-		Source:       "rule:car_approaching",
-		DedupKey:     fmt.Sprintf("car_approaching:%d:%d", lead.CarIndex, state.CurrentLap),
-		DedupSubject: fmt.Sprintf("car:%d", lead.CarIndex),
+		Source:       "rule:traffic_update",
+		DedupKey:     fmt.Sprintf("traffic_update:%d:%d:%d", state.CurrentLap, leadBehindIdx, leadAheadIdx),
+		DedupSubject: "traffic",
 	}
 }
+
+// nearbyCarToMap serialises a NearbyCar into the DebugData shape. Keys
+// are stable so dashboards / the Live agent can read them positionally.
+func nearbyCarToMap(c NearbyCar) map[string]any {
+	return map[string]any{
+		"car_index":   int(c.CarIndex),
+		"driver":      c.DriverName,
+		"position":    int(c.Position),
+		"current_lap": int(c.CurrentLap),
+		"distance_m":  c.DistanceM,
+		"signed_m":    c.SignedM,
+		"closing_mps": c.ClosingMps,
+		"eta_sec":     c.EtaSec,
+		"threat":      c.Threat,
+		"speed_kmh":   int(c.SpeedKmh),
+	}
+}
+
+// buildTrafficSummary phrases the ≤80-char headline. Producers send
+// FACTS, not radio sentences — the Live agent rewrites this — but a
+// dense human-readable form keeps logs and dashboards usable.
+func buildTrafficSummary(firingAhead, firingBehind []NearbyCar) string {
+	nb := len(firingBehind)
+	na := len(firingAhead)
+	var leadBehind, leadAhead *NearbyCar
+	if nb > 0 {
+		l := firingBehind[0]
+		for i := range firingBehind[1:] {
+			if firingBehind[1+i].EtaSec >= 0 && firingBehind[1+i].EtaSec < l.EtaSec {
+				l = firingBehind[1+i]
+			}
+		}
+		leadBehind = &l
+	}
+	if na > 0 {
+		l := firingAhead[0]
+		for i := range firingAhead[1:] {
+			if firingAhead[1+i].EtaSec >= 0 && firingAhead[1+i].EtaSec < l.EtaSec {
+				l = firingAhead[1+i]
+			}
+		}
+		leadAhead = &l
+	}
+
+	switch {
+	case nb > 0 && na > 0:
+		summary := fmt.Sprintf("%d closing behind, %d ahead — lead behind ~%.1fs.", nb, na, leadBehind.EtaSec)
+		if len(summary) > brain.MaxEventSummaryChars {
+			summary = fmt.Sprintf("%dB %dA closing — lead ~%.1fs.", nb, na, leadBehind.EtaSec)
+		}
+		return summary
+	case nb > 0:
+		if nb == 1 {
+			label := leadBehind.DriverName
+			if label == "" {
+				label = fmt.Sprintf("#%d", leadBehind.CarIndex)
+			}
+			s := fmt.Sprintf("%s closing — %.0fm behind, ~%.1fs.", label, leadBehind.DistanceM, leadBehind.EtaSec)
+			if len(s) > brain.MaxEventSummaryChars {
+				s = fmt.Sprintf("Car behind closing ~%.1fs.", leadBehind.EtaSec)
+			}
+			return s
+		}
+		return fmt.Sprintf("%d closing behind — lead ~%.1fs.", nb, leadBehind.EtaSec)
+	default:
+		if na == 1 {
+			label := leadAhead.DriverName
+			if label == "" {
+				label = fmt.Sprintf("#%d", leadAhead.CarIndex)
+			}
+			s := fmt.Sprintf("Catching %s — %.0fm ahead, ~%.1fs.", label, leadAhead.DistanceM, leadAhead.EtaSec)
+			if len(s) > brain.MaxEventSummaryChars {
+				s = fmt.Sprintf("Catching car ahead ~%.1fs.", leadAhead.EtaSec)
+			}
+			return s
+		}
+		return fmt.Sprintf("Catching %d ahead — lead ~%.1fs.", na, leadAhead.EtaSec)
+	}
+}
+
+// buildTrafficReasoning produces a dense fact line (≤200 chars) for the
+// LLM prompt. Lists firing cars only; the full top-N lists live in
+// DebugData where the model can read them structured.
+func buildTrafficReasoning(firingAhead, firingBehind []NearbyCar) string {
+	parts := make([]string, 0, len(firingAhead)+len(firingBehind))
+	for _, c := range firingBehind {
+		l := c.DriverName
+		if l == "" {
+			l = fmt.Sprintf("#%d", c.CarIndex)
+		}
+		parts = append(parts, fmt.Sprintf("BEHIND %s P%d %.0fm %.1fm/s ETA %.1fs", l, c.Position, c.DistanceM, c.ClosingMps, c.EtaSec))
+	}
+	for _, c := range firingAhead {
+		l := c.DriverName
+		if l == "" {
+			l = fmt.Sprintf("#%d", c.CarIndex)
+		}
+		parts = append(parts, fmt.Sprintf("AHEAD %s P%d %.0fm %.1fm/s ETA %.1fs", l, c.Position, c.DistanceM, c.ClosingMps, c.EtaSec))
+	}
+	r := strings.Join(parts, "; ")
+	if len(r) > brain.MaxEventReasoningChars {
+		r = r[:brain.MaxEventReasoningChars]
+	}
+	return r
+}
+
+// (Old per-direction fire helpers removed — replaced by maybeFireTrafficUpdate above.)
 
 func (w *ProximityWatcher) publishEmpty(state *models.RaceState) {
 	snap := &ProximitySnapshot{

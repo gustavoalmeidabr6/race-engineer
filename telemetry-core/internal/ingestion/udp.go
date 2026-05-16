@@ -13,6 +13,7 @@ import (
 	"github.com/tusharbhardwaj/race-engineer/telemetry-core/internal/config"
 	"github.com/tusharbhardwaj/race-engineer/telemetry-core/internal/models"
 	"github.com/tusharbhardwaj/race-engineer/telemetry-core/internal/storage"
+	"github.com/tusharbhardwaj/race-engineer/telemetry-core/internal/trackmap"
 )
 
 // EventHook is invoked once per parsed race event (yellow flag, SC, retirement,
@@ -30,6 +31,7 @@ type Ingester struct {
 	packetsRx  atomic.Uint64 // total packets received, for health endpoint
 	PTTChan    chan bool     // push-to-talk state changes from F1 BUTN events
 	eventHook  EventHook     // optional hook invoked on race events (set via SetEventHook)
+	trackMap   *trackmap.Registry // optional — used by the mock generator to lay cars on a real track shape
 }
 
 // NewIngester creates a new Ingester wired to the given config and storage.
@@ -49,6 +51,14 @@ func (ing *Ingester) SetEventHook(h EventHook) {
 	ing.eventHook = h
 }
 
+// SetTrackMap wires the curated track registry into the ingester so the mock
+// generator can lay 22 cars on the real shape of the configured track
+// (instead of a generic circle). Optional — when nil the mock falls back to
+// the legacy oval.
+func (ing *Ingester) SetTrackMap(tm *trackmap.Registry) {
+	ing.trackMap = tm
+}
+
 // Start launches the three pipeline goroutines into the provided WaitGroup.
 func (ing *Ingester) Start(ctx context.Context, wg *sync.WaitGroup) {
 	wg.Add(3)
@@ -61,7 +71,7 @@ func (ing *Ingester) Start(ctx context.Context, wg *sync.WaitGroup) {
 			}
 			if ing.cfg.MockMode.Load() {
 				// Use the enhanced mock generator (all 16 packet types).
-				mock := &MockGenerator{}
+				mock := &MockGenerator{trackMap: ing.trackMap}
 				mock.Run(c, ing.cfg, ing.packetChan, &ing.packetsRx, ing.cfg.MockMode.Load)
 			} else {
 				ing.udpLoop(c)

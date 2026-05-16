@@ -48,6 +48,51 @@ type Engine struct {
 	prevPosition       uint8       // for detecting overtakes against current Position
 	gapBehindSamples   []gapSample // ring of recent gap-to-car-behind readings
 	closingThreatLatch bool        // true while a "closing" event has fired and the gap hasn't re-opened
+
+	// prevPositionAny is the tracker for emitPositionChange (see
+	// position_change.go). Separate from prevPosition because that field
+	// is gated to race sessions and only watches losses, while
+	// emitPositionChange fires on any change in any session.
+	prevPositionAny uint8
+
+	// Debounce state for emitPositionChange. A burst of consecutive
+	// changes (got passed by 3 cars in a row) used to fire 3 separate
+	// P3 events; the settle window collapses the burst into ONE event
+	// citing the position the driver held BEFORE the burst started.
+	//
+	//   pendingPositionPrev   — position at the moment the burst began
+	//                           (i.e. the "from" we will cite)
+	//   pendingPositionLast   — most recent observed position; reset of
+	//                           settle timer triggers on every change
+	//   pendingPositionChange — wall-clock of the most recent change;
+	//                           emission waits until now-this exceeds
+	//                           positionChangeSettleWindow
+	pendingPositionPrev   uint8
+	pendingPositionLast   uint8
+	pendingPositionChange time.Time
+
+	// now is the engine's clock. nil → time.Now. Tests inject a fake so
+	// they can advance through the debounce window without sleeping.
+	now func() time.Time
+
+	// fuelSamples is a small ring of (timestamp, FuelInTank) readings used
+	// by emitFuelRate to compute a kg/sec burn-rate trend. See fuel.go.
+	fuelSamples []fuelSample
+}
+
+// positionChangeSettleWindow is how long a stream of position changes
+// must be quiet before we emit. Five seconds is long enough that the
+// "passed by three cars on the back straight" sequence collapses into
+// one event, short enough that the radio call still feels timely.
+const positionChangeSettleWindow = 5 * time.Second
+
+// clock returns the engine's notion of "now". Tests inject a fake; the
+// production path falls back to time.Now.
+func (e *Engine) clock() time.Time {
+	if e.now != nil {
+		return e.now()
+	}
+	return time.Now()
 }
 
 // gapSample is one reading of the player's gap to the car directly behind.

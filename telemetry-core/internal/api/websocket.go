@@ -31,6 +31,11 @@ type Hub struct {
 	pushRateHz int
 	cacheLoad  func() *models.RaceState
 	healthFn   func() interface{}
+	// trackPosFn, when non-nil, is called on every telemetry tick to
+	// produce the per-tick player + grid payload broadcast as the
+	// "track_position" WS message. Lets the dashboard LiveMap consume
+	// the same data the REST endpoint serves without polling.
+	trackPosFn func(*models.RaceState) any
 
 	// transcript, when non-nil, receives ws_connected/ws_disconnected
 	// rows on every register/unregister — visible in the Live Debug tab.
@@ -41,7 +46,9 @@ type Hub struct {
 // pushRateHz controls how often telemetry is pushed (e.g. 10 = every 100ms).
 // cacheLoad reads the atomic RaceState cache.
 // healthFn builds the health payload.
-func NewHub(pushRateHz int, cacheLoad func() *models.RaceState, healthFn func() interface{}) *Hub {
+// trackPosFn, if non-nil, is invoked on every telemetry tick to produce the
+// "track_position" payload (player + grid + headline). Pass nil to disable.
+func NewHub(pushRateHz int, cacheLoad func() *models.RaceState, healthFn func() interface{}, trackPosFn func(*models.RaceState) any) *Hub {
 	if pushRateHz < 1 {
 		pushRateHz = 1
 	}
@@ -53,6 +60,7 @@ func NewHub(pushRateHz int, cacheLoad func() *models.RaceState, healthFn func() 
 		pushRateHz: pushRateHz,
 		cacheLoad:  cacheLoad,
 		healthFn:   healthFn,
+		trackPosFn: trackPosFn,
 	}
 }
 
@@ -197,6 +205,13 @@ func (h *Hub) Run(ctx context.Context) {
 				continue
 			}
 			h.broadcast(data)
+
+			if h.trackPosFn != nil {
+				tpMsg := wsMessage{Type: "track_position", Data: h.trackPosFn(state)}
+				if tpData, err := json.Marshal(tpMsg); err == nil {
+					h.broadcast(tpData)
+				}
+			}
 
 		case <-healthTicker.C:
 			health := h.healthFn()

@@ -122,10 +122,18 @@ func transcriptListHandler(deps *Deps) fiber.Handler {
 		if events == nil {
 			events = []transcript.Event{}
 		}
+		// Resolve the scope so the response advertises which session file
+		// was actually read, not just the live session. Failures here are
+		// non-fatal — Load already succeeded.
+		resolved, _ := deps.Transcript.ResolveScope(scope)
+		if resolved == "" {
+			resolved = deps.Transcript.CurrentSession()
+		}
 		return c.JSON(fiber.Map{
-			"session_id": deps.Transcript.CurrentSession(),
-			"scope":      scope,
-			"events":     events,
+			"session_id":      resolved,
+			"current_session": deps.Transcript.CurrentSession(),
+			"scope":           scope,
+			"events":          events,
 		})
 	}
 }

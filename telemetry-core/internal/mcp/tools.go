@@ -95,7 +95,17 @@ func (s *Server) registerStateTools() {
 	for _, route := range []struct {
 		name, path, desc string
 	}{
-		{"get_state_race", "/api/state/race", "Race-topic state bundle: position, lap, gaps to leader and ahead/behind, pit count."},
+		{"get_state_race", "/api/state/race",
+			"Race-topic state bundle: position, lap, gaps to leader and ahead/behind, pit count, " +
+				"plus derived race-lifecycle fields (phase, laps_remaining, race_finished, final_classification). " +
+				"Use phase to branch behaviour: grid/formation = pre-race, lights_out = launch, racing = mid-race, " +
+				"final_lap = last lap, finished = race over."},
+		{"get_race_phase", "/api/state/race_phase",
+			"Compact race-lifecycle bundle for phase-aware strategy. Returns phase (grid|formation|lights_out|racing|final_lap|finished), " +
+				"current_lap, total_laps, laps_remaining, session_time_left_sec, race_finished, final_classification, " +
+				"grid_position, position, and a one-line strategy_hint chosen by phase. Cheap — call freely whenever a strategy " +
+				"recommendation depends on where in the race we are. Late-race (≤5 to go) flips conservation-framed calls to " +
+				"push-framed; damage + low laps_remaining favours 'manage to finish' over 'box for nose'."},
 		{"get_state_tires", "/api/state/tires", "Tire-topic state bundle: compound, age, wear per corner, surface/inner temps."},
 		{"get_state_energy", "/api/state/energy", "Energy-topic state bundle: fuel in tank, fuel mix, ERS store + deploy mode, harvested-this-lap."},
 		{"get_state_competitors", "/api/state/competitors", "Competitors bundle: nearby cars (±3 positions) with compound, tire age, pit count."},
@@ -103,6 +113,17 @@ func (s *Server) registerStateTools() {
 		{"get_state_events", "/api/state/events", "Recent race events (yellow flags, SC, weather changes, etc.)"},
 		{"get_state_track_position", "/api/state/track_position", "All cars' on-track lap_distance — useful with /state/proximity."},
 		{"get_state_proximity", "/api/state/proximity", "Closing-from-behind / catching-ahead bundle."},
+		{"get_nearby_cars", "/api/state/nearby_cars",
+			"Top 5 cars physically ahead on track + top 5 behind, regardless of race-position gap or watcher window. " +
+				"Each entry carries driver surname, signed track distance, closing rate, ETA-to-contact, and a threat label. " +
+				"Use for spatial-awareness coaching, traffic management, and defence-vs-attack decisions."},
+		{"get_state_driver_settings", "/api/state/driver_settings",
+			"Current driver-controllable F1 setup channels: cockpit (brake bias %, on/off-throttle differential, " +
+				"engine braking, ERS deploy mode, fuel mix) and setup-screen-only (front/rear wing, cold tyre pressures, " +
+				"ballast, fuel load). Returns wing damage, DRS usage this lap (used_s/available_s/utilization_pct), " +
+				"and the last 8 setting changes (channel, from, to, lap). CALL FIRST before suggesting any setup tweak. " +
+				"The 'cockpit' block is changeable mid-stint via the wheel; 'setup_screen' is garage / next-pit only — " +
+				"phrase recommendations accordingly so the driver doesn't try to dial a wing angle from the cockpit."},
 	} {
 		route := route
 		s.mcp.AddTool(
@@ -123,10 +144,15 @@ func (s *Server) registerStateTools() {
 func (s *Server) registerLapTools() {
 	s.mcp.AddTool(
 		mcp.NewTool("list_laps",
-			mcp.WithDescription("List completed laps with time/sector/valid info. Always call this BEFORE get_lap_traces / get_lap_delta / compare_lap_corners so the lap numbers you pass are real."),
+			mcp.WithDescription("List completed laps with time/sector/valid info. Always call this BEFORE get_lap_traces / get_lap_delta / compare_lap_corners so the lap numbers you pass are real. Pass session_uid (from list_sessions) to read a past session — when omitted the live session is used."),
+			mcp.WithString("session_uid", mcp.Description("Optional past session_uid (decimal, from list_sessions). When set, returns laps for that past session instead of the current one.")),
 		),
-		func(ctx context.Context, _ mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-			body, err := s.httpGet(ctx, "/api/laps/list", nil)
+		func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+			q := map[string]string{}
+			if v, ok := req.GetArguments()["session_uid"].(string); ok && strings.TrimSpace(v) != "" {
+				q["session_uid"] = strings.TrimSpace(v)
+			}
+			body, err := s.httpGet(ctx, "/api/laps/list", q)
 			if err != nil {
 				return errResult(err), nil
 			}
@@ -136,10 +162,11 @@ func (s *Server) registerLapTools() {
 
 	s.mcp.AddTool(
 		mcp.NewTool("get_lap_traces",
-			mcp.WithDescription("Bucketed channel arrays per lap, indexed by track distance. Channels: throttle, brake, speed, gear, steering, rpm, g_lat, g_lon, g_vert, brake_temp{,_fl,_fr,_rl,_rr}, tyre_temp{,_fl,_fr,_rl,_rr}, tyre_inner_temp, tyre_pressure{,_fl,_fr,_rl,_rr}, fuel, ers_store, ers_deploy_mode, clutch, drs."),
+			mcp.WithDescription("Bucketed channel arrays per lap, indexed by track distance. Channels: throttle, brake, speed, gear, steering, rpm, g_lat, g_lon, g_vert, brake_temp{,_fl,_fr,_rl,_rr}, tyre_temp{,_fl,_fr,_rl,_rr}, tyre_inner_temp, tyre_pressure{,_fl,_fr,_rl,_rr}, fuel, ers_store, ers_deploy_mode, clutch, drs. Pass session_uid (from list_sessions) to scope to a past session."),
 			mcp.WithString("laps", mcp.Description("Comma-separated: lap numbers, or 'best','current','last','recent:N'. Default 'best,current'.")),
 			mcp.WithString("channels", mcp.Description("Comma-separated channel names. Default 'throttle,brake,speed'.")),
 			mcp.WithNumber("buckets", mcp.Description("Number of distance buckets (20-200, default 80).")),
+			mcp.WithString("session_uid", mcp.Description("Optional past session_uid (decimal, from list_sessions). When set, lap-number tokens resolve against that session instead of the live one.")),
 		),
 		func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 			args := req.GetArguments()
@@ -153,6 +180,9 @@ func (s *Server) registerLapTools() {
 			if v, ok := args["buckets"].(float64); ok && v > 0 {
 				q["buckets"] = fmt.Sprintf("%d", int(v))
 			}
+			if v, ok := args["session_uid"].(string); ok && strings.TrimSpace(v) != "" {
+				q["session_uid"] = strings.TrimSpace(v)
+			}
 			body, err := s.httpGet(ctx, "/api/laps/traces", q)
 			if err != nil {
 				return errResult(err), nil
@@ -163,10 +193,13 @@ func (s *Server) registerLapTools() {
 
 	s.mcp.AddTool(
 		mcp.NewTool("get_lap_delta",
-			mcp.WithDescription("Cumulative time-delta-vs-reference at every distance bucket. The single most actionable view for 'where am I losing time?' coaching."),
+			mcp.WithDescription("Cumulative time-delta-vs-reference at every distance bucket. The single most actionable view for 'where am I losing time?' coaching. Pass session_uid to scope to a past session, or lap_session_uid / reference_session_uid to compare laps across two different sessions (e.g. today's lap vs last week's best)."),
 			mcp.WithString("lap", mcp.Description("Lap number, or 'last' (default).")),
 			mcp.WithString("reference", mcp.Description("Reference lap: number, or 'best' (default).")),
 			mcp.WithNumber("buckets", mcp.Description("Distance buckets (20-200, default 80).")),
+			mcp.WithString("session_uid", mcp.Description("Optional past session_uid (decimal). Scopes both lap and reference to that session unless overridden below.")),
+			mcp.WithString("lap_session_uid", mcp.Description("Optional override: pin the 'your' lap to this session_uid.")),
+			mcp.WithString("reference_session_uid", mcp.Description("Optional override: pin the reference lap to this session_uid (e.g. best lap from last race).")),
 		),
 		func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 			args := req.GetArguments()
@@ -180,6 +213,11 @@ func (s *Server) registerLapTools() {
 			if v, ok := args["buckets"].(float64); ok && v > 0 {
 				q["buckets"] = fmt.Sprintf("%d", int(v))
 			}
+			for _, k := range []string{"session_uid", "lap_session_uid", "reference_session_uid"} {
+				if v, ok := args[k].(string); ok && strings.TrimSpace(v) != "" {
+					q[k] = strings.TrimSpace(v)
+				}
+			}
 			body, err := s.httpGet(ctx, "/api/laps/delta", q)
 			if err != nil {
 				return errResult(err), nil
@@ -189,12 +227,45 @@ func (s *Server) registerLapTools() {
 	)
 
 	s.mcp.AddTool(
+		mcp.NewTool("get_lap_snapshot",
+			mcp.WithDescription("Compact ASCII strip-chart snapshot of one lap as plain text — throttle, brake, speed, gear, slip, DRS, surface, plus a delta-vs-reference strip when a reference lap is available. Use when you want to scan a lap visually instead of reading per-bucket JSON. Cross-session via lap_session_uid / reference_session_uid; chain after get_best_lap_at_track for 'how does this lap look vs my best ever?'."),
+			mcp.WithString("lap", mcp.Description("Lap to render. 'last' (default) or a positive integer.")),
+			mcp.WithString("reference", mcp.Description("Reference lap for the delta strip. 'best' (default), 'none' to skip, or a positive integer.")),
+			mcp.WithNumber("width", mcp.Description("Chart width in characters (40-160). Default 80.")),
+			mcp.WithString("channels", mcp.Description("Optional CSV from: throttle, brake, speed, gear, slip, drs, surface. Default = all.")),
+			mcp.WithString("lap_session_uid", mcp.Description("Optional past session_uid for the lap (decimal, from list_sessions).")),
+			mcp.WithString("reference_session_uid", mcp.Description("Optional past session_uid for the reference lap.")),
+			mcp.WithString("session_uid", mcp.Description("Optional past session_uid used when neither lap_session_uid nor reference_session_uid is supplied.")),
+		),
+		func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+			args := req.GetArguments()
+			q := map[string]string{}
+			for _, k := range []string{"lap", "reference", "channels", "lap_session_uid", "reference_session_uid", "session_uid"} {
+				if v, ok := args[k].(string); ok && strings.TrimSpace(v) != "" {
+					q[k] = strings.TrimSpace(v)
+				}
+			}
+			if v, ok := args["width"].(float64); ok && v > 0 {
+				q["width"] = fmt.Sprintf("%d", int(v))
+			}
+			body, err := s.httpGet(ctx, "/api/laps/snapshot", q)
+			if err != nil {
+				return errResult(err), nil
+			}
+			return textResult(body), nil
+		},
+	)
+
+	s.mcp.AddTool(
 		mcp.NewTool("compare_lap_corners",
-			mcp.WithDescription("Per-corner brake-point + apex-speed + exit-throttle deltas vs the driver's best valid lap this session."),
+			mcp.WithDescription("Per-corner brake-point + apex-speed + exit-throttle deltas vs the driver's best valid lap (this session by default, or session_uid). Pass reference_session_uid (+ optional reference_lap) to pull the baseline from a different same-track session — 'today's lap vs my best ever at Monza'."),
 			mcp.WithString("lap", mcp.Description("Lap number to compare; default = most recent completed lap.")),
 			mcp.WithString("corner", mcp.Description("Optional corner id (e.g. 'T3'); default = all curated corners.")),
 			mcp.WithNumber("window_before_m", mcp.Description("Metres before the corner to inspect (default 200).")),
 			mcp.WithNumber("window_after_m", mcp.Description("Metres after the corner to inspect (default 50).")),
+			mcp.WithString("session_uid", mcp.Description("Optional past session_uid (decimal, from list_sessions). When set, both the comparison lap and its best-lap baseline come from that past session.")),
+			mcp.WithString("reference_session_uid", mcp.Description("Optional override: pin the baseline lap to this session_uid (e.g. all-time best at the track). Same track required.")),
+			mcp.WithString("reference_lap", mcp.Description("Optional override: use this specific lap number as the baseline (rather than that session's best valid lap).")),
 		),
 		func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 			args := req.GetArguments()
@@ -211,6 +282,11 @@ func (s *Server) registerLapTools() {
 			if v, ok := args["window_after_m"].(float64); ok && v > 0 {
 				q["window_after_m"] = fmt.Sprintf("%d", int(v))
 			}
+			for _, k := range []string{"session_uid", "reference_session_uid", "reference_lap"} {
+				if v, ok := args[k].(string); ok && strings.TrimSpace(v) != "" {
+					q[k] = strings.TrimSpace(v)
+				}
+			}
 			body, err := s.httpGet(ctx, "/api/laps/compare", q)
 			if err != nil {
 				return errResult(err), nil
@@ -223,16 +299,32 @@ func (s *Server) registerLapTools() {
 		name, path, desc string
 		params           []mcp.ToolOption
 	}{
-		{"get_corner_brake_history", "/api/laps/brake_points", "Brake-onset distance, min-speed, max-brake, lock-up signatures per corner across recent laps + trend (braking-later / earlier / consistent).", []mcp.ToolOption{
+		{"get_corner_brake_history", "/api/laps/brake_points", "Brake-onset distance, min-speed, max-brake, lock-up signatures per corner across recent laps + trend (braking-later / earlier / consistent). Pass session_uid to scope to a past session.", []mcp.ToolOption{
 			mcp.WithString("corner", mcp.Description("Corner id; required.")),
 			mcp.WithNumber("laps", mcp.Description("How many recent laps to include (default 10).")),
+			mcp.WithString("session_uid", mcp.Description("Optional past session_uid (decimal, from list_sessions).")),
 		}},
-		{"get_brake_balance_report", "/api/laps/brake_balance", "Per-event left-vs-right + front-vs-rear brake-temp asymmetry + lock-up flags.", []mcp.ToolOption{
+		{"get_brake_balance_report", "/api/laps/brake_balance", "Per-event left-vs-right + front-vs-rear brake-temp asymmetry + lock-up flags. Pass session_uid to scope to a past session.", []mcp.ToolOption{
 			mcp.WithString("corner", mcp.Description("Optional corner id filter.")),
 			mcp.WithNumber("laps", mcp.Description("Recent laps to include (default 5).")),
+			mcp.WithString("session_uid", mcp.Description("Optional past session_uid (decimal, from list_sessions).")),
 		}},
-		{"get_corner_coaching_report", "/api/coaching/corner_report", "Single-call synthesis: brake history + apex/exit deltas + brake-balance + rule-based diagnosis.", []mcp.ToolOption{
+		{"get_corner_coaching_report", "/api/coaching/corner_report", "Single-call synthesis: brake history + apex/exit deltas + brake-balance + rule-based diagnosis. Pass session_uid to scope to a past session.", []mcp.ToolOption{
 			mcp.WithString("corner", mcp.Description("Corner id; required.")),
+			mcp.WithString("session_uid", mcp.Description("Optional past session_uid (decimal, from list_sessions).")),
+		}},
+		{"get_drs_usage", "/api/laps/drs_usage", "Per-lap DRS analytics from telemetry_hifreq: " +
+			"available_s (seconds DRS was permitted on the lap), active_s (seconds the flap was actually open), " +
+			"utilization_pct, first_open_distance_m, first_allowed_distance_m. Use to flag missed/late zone openings " +
+			"and coach DRS timing — utilization under 70% on a long zone is the canonical 'open earlier' signal.", []mcp.ToolOption{
+			mcp.WithString("lap", mcp.Description("Lap selector: 'last' (default), 'best', positive integer, or 'recent:N'.")),
+		}},
+		{"get_best_lap_at_track", "/api/laps/best_at_track", "All-time best valid lap at a given track. Returns " +
+			"session_uid + lap_num + lap_time_ms + session_type — chain directly into get_lap_delta with " +
+			"reference_session_uid + reference=<lap> for 'how does this lap compare to my best ever here?'. " +
+			"Omit track_id to use the current session's track.", []mcp.ToolOption{
+			mcp.WithNumber("track_id", mcp.Description("F1 25 track id. Omit to use the current session's track.")),
+			mcp.WithString("session_type", mcp.Description("Optional filter: 'all' (default), 'practice', 'quali', 'race', 'time_trial'.")),
 		}},
 	} {
 		route := route
@@ -245,8 +337,20 @@ func (s *Server) registerLapTools() {
 				if v, ok := args["corner"].(string); ok {
 					q["corner"] = v
 				}
+				if v, ok := args["session_uid"].(string); ok && strings.TrimSpace(v) != "" {
+					q["session_uid"] = strings.TrimSpace(v)
+				}
 				if v, ok := args["laps"].(float64); ok && v > 0 {
 					q["laps"] = fmt.Sprintf("%d", int(v))
+				}
+				if v, ok := args["lap"].(string); ok && strings.TrimSpace(v) != "" {
+					q["lap"] = strings.TrimSpace(v)
+				}
+				if v, ok := args["track_id"].(float64); ok && v > 0 {
+					q["track_id"] = fmt.Sprintf("%d", int(v))
+				}
+				if v, ok := args["session_type"].(string); ok && strings.TrimSpace(v) != "" {
+					q["session_type"] = strings.TrimSpace(v)
 				}
 				body, err := s.httpGet(ctx, route.path, q)
 				if err != nil {

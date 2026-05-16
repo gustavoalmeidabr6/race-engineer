@@ -62,6 +62,21 @@ type Snapshot struct {
 	Events       []RaceEvent
 	Static       StaticContext
 	PendingJobs  []PendingJob
+
+	// PendingEvents are events with Status ∈ {Queued, InFlight}. The Live
+	// agent and pi-agent read these so they know what's still owed to the
+	// driver — beyond the "Recent Radio" / "Active Observations" blocks
+	// already in the snapshot.
+	PendingEvents []Event
+
+	// AwaitingAck holds events that have been spoken but require a driver
+	// copy. AwaitingAckSince + NagCount let the agent reason about
+	// whether to re-engage the driver.
+	AwaitingAck []Event
+
+	// OpenDriverQuestions surfaces transcribed driver utterances the
+	// engineer hasn't yet substantively addressed — see brain.OpenDriverQuestions.
+	OpenDriverQuestions []DriverUtterance
 }
 
 // Snapshot returns a filtered, immutable view of the brain.
@@ -160,6 +175,36 @@ func (b *RaceBrain) Snapshot(opts SnapshotOpts) Snapshot {
 
 	if len(b.pendingJobs) > 0 {
 		snap.PendingJobs = append([]PendingJob(nil), b.pendingJobs...)
+	}
+
+	// Surface the Interrupts Bus state inline so the agent's prompt
+	// reflects exactly what's still owed to the driver. Split into two
+	// buckets so the markdown renderer can describe their meanings
+	// distinctly.
+	if len(b.eventQueue) > 0 {
+		for _, e := range b.eventQueue {
+			switch e.Status {
+			case StatusAwaitingAck:
+				snap.AwaitingAck = append(snap.AwaitingAck, e)
+			case StatusQueued, StatusInFlight:
+				snap.PendingEvents = append(snap.PendingEvents, e)
+			}
+		}
+	}
+
+	if len(b.driverUtterances) > 0 {
+		// Inline copy of OpenDriverQuestions logic so we can reuse the
+		// already-held read lock instead of double-acquiring.
+		const window = 90 * time.Second
+		for _, u := range b.driverUtterances {
+			if u.Addressed {
+				continue
+			}
+			if now.Sub(u.At) > window {
+				continue
+			}
+			snap.OpenDriverQuestions = append(snap.OpenDriverQuestions, u)
+		}
 	}
 
 	return snap

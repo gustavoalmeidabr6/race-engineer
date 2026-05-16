@@ -50,6 +50,28 @@ LOG_FILE="${LOG_FILE:-$LOG_DIR/race-engineer-$(date +%Y%m%d-%H%M%S).log}"
 ln -sf "$(basename "$LOG_FILE")" "$LOG_DIR/latest.log" 2>/dev/null || true
 echo "Logging to: $LOG_FILE  (symlink: $LOG_DIR/latest.log)"
 
+# ── Pre-launch cleanup ───────────────────────────────────────────────────
+# See start.sh for full rationale. The Ctrl+C trap above only fires on
+# graceful exit of this script, so a previous run killed via crash /
+# terminal-close / kill -9 leaves orphans holding :8081 (telemetry-core)
+# and :8092 (vite). Always TERM+KILL them before launching the new stack.
+echo "Killing any orphaned processes from previous runs…"
+pkill -TERM -f "workspace/bin/telemetry-core" 2>/dev/null || true
+pkill -TERM -f "dashboard/node_modules/.bin/vite" 2>/dev/null || true
+sleep 0.5
+pkill -KILL -f "workspace/bin/telemetry-core" 2>/dev/null || true
+pkill -KILL -f "dashboard/node_modules/.bin/vite" 2>/dev/null || true
+if command -v lsof >/dev/null 2>&1; then
+    for port in "${API_PORT:-8081}" 8092; do
+        stragglers=$(lsof -ti tcp:"$port" 2>/dev/null || true)
+        if [ -n "$stragglers" ]; then
+            echo "  Force-killing stragglers on :$port: $stragglers"
+            kill -KILL $stragglers 2>/dev/null || true
+        fi
+    done
+    sleep 0.2
+fi
+
 # ── Build Go binaries ────────────────────────────────────────────────────
 echo "Building telemetry-core…"
 (cd telemetry-core && go build -o ../workspace/bin/telemetry-core ./cmd/server)

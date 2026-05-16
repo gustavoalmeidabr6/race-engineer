@@ -37,7 +37,17 @@ build:
 	cd telemetry-core && go build -o ../workspace/bin/buttonwatch cmd/buttonwatch/main.go
 	@echo "Building configtool CLI..."
 	cd telemetry-core && go build -o ../workspace/bin/configtool ./cmd/configtool
+	@echo "Building bakecenterline CLI..."
+	cd telemetry-core && go build -o ../workspace/bin/bakecenterline ./cmd/bakecenterline
 	@echo "Build complete!"
+
+# bake-centerlines builds just the bakecenterline tool. The operator then runs
+# it manually (e.g. `./workspace/bin/bakecenterline -track 7`) after driving
+# one good lap on a track to extract its racing line into workspace/tracks/.
+bake-centerlines:
+	cd telemetry-core && go build -o ../workspace/bin/bakecenterline ./cmd/bakecenterline
+	@echo "Built ./workspace/bin/bakecenterline"
+	@echo "Usage: ./workspace/bin/bakecenterline -track <id> [-lap best|last|N] [-session UID]"
 
 # Build just the configtool binary so it's available before `make build`.
 configtool:

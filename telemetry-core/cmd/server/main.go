@@ -13,6 +13,7 @@ import (
 	"github.com/rs/zerolog/log"
 
 	"github.com/tusharbhardwaj/race-engineer/telemetry-core/internal/api"
+	"github.com/tusharbhardwaj/race-engineer/telemetry-core/internal/audio"
 	"github.com/tusharbhardwaj/race-engineer/telemetry-core/internal/brain"
 	"github.com/tusharbhardwaj/race-engineer/telemetry-core/internal/config"
 	"github.com/tusharbhardwaj/race-engineer/telemetry-core/internal/ingestion"
@@ -343,6 +344,7 @@ func main() {
 
 	// ── 10. Ingestion Pipeline (3 self-healing goroutines) ───────────────
 	ingester := ingestion.NewIngester(cfg, store)
+	ingester.SetTrackMap(trackReg)
 	ingester.SetEventHook(func(code, detail string, vehicleIdx int) {
 		raceBrain.RecordEvent(brain.RaceEvent{
 			Code:       code,
@@ -375,6 +377,17 @@ func main() {
 				"udp_mode":   cfg.RuntimeUDPMode(),
 			}
 		},
+		// Per-tick track_position dynamic payload for dashboard LiveMap.
+		// Geometry (corners/length/sector_starts) still comes one-shot via
+		// REST /api/state/track_position; this push covers only the player
+		// + 22-car grid + headline that changes every UDP packet.
+		func(s *models.RaceState) any {
+			var track *trackmap.TrackInfo
+			if trackReg != nil {
+				track = trackReg.Lookup(s.TrackID)
+			}
+			return api.BuildTrackPositionDynamic(s, track, store.Roster())
+		},
 	)
 	wsHub.SetTranscript(transcriptHub)
 
@@ -403,21 +416,27 @@ func main() {
 	}()
 
 	// Drain PTTChan → broadcast push-to-talk state to WebSocket clients.
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case active, ok := <-ingester.PTTChan:
-				if !ok {
+	// Only spawned when the legacy PTT path is enabled: in live_only mode
+	// the ingestion writer never pushes to PTTChan and the dashboard
+	// ignores `ptt` WebSocket frames anyway, so the drain goroutine has
+	// nothing to do.
+	if cfg.PTTPathEnabled() {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				select {
+				case <-ctx.Done():
 					return
+				case active, ok := <-ingester.PTTChan:
+					if !ok {
+						return
+					}
+					wsHub.BroadcastPTT(active)
 				}
-				wsHub.BroadcastPTT(active)
 			}
-		}
-	}()
+		}()
+	}
 
 	// ── 12. Voice — in-process Gemini TTS + STT (Phase 3.1) ─────────────
 	// Boot a single SDK client for each direction. Errors are non-fatal:
@@ -453,8 +472,30 @@ func main() {
 	// the runtime invariant that prevents future regressions.
 	audioArbiter := voice.NewOutputArbiter()
 
+	// audioDucker (optional) lowers external music players (Spotify,
+	// Apple Music, browsers, VLC, ...) while the engineer is speaking.
+	// Per-OS native code lives in internal/audio. Disabled by default
+	// — opt in via AUDIO_DUCKING_ENABLED.
+	var audioDucker *audio.Coordinator
+	if cfg.AudioDuckingEnabled {
+		targets := parseAudioTargets(cfg.AudioDuckingTargets)
+		mode := audio.ParseMode(cfg.AudioDuckingMode)
+		d, derr := audio.NewOSDucker(targets, cfg.AudioDuckingLevel, mode)
+		if derr != nil {
+			log.Warn().Err(derr).Msg("audio ducker init failed; ducking disabled")
+		} else {
+			audioDucker = audio.NewCoordinator(d)
+			log.Info().
+				Str("mode", cfg.AudioDuckingMode).
+				Float64("level", cfg.AudioDuckingLevel).
+				Int("tail_ms", cfg.AudioDuckingTailMs).
+				Msg("audio ducking enabled")
+		}
+	}
+
 	voiceClient := intelligence.NewVoiceClient(geminiTTS, ackCache, voiceChan, wsHub)
 	voiceClient.SetArbiter(audioArbiter)
+	voiceClient.SetDucker(audioDucker)
 	if cfg.GeminiLiveEnabled {
 		// Gemini Live owns the voice surface; standard TTS is intentionally
 		// disabled in that mode. Drain the channel so producers don't block.
@@ -571,6 +612,17 @@ func main() {
 				OutputText:       outputText,
 				ToolEvents:       toolEvents,
 				RadioCheckPrompt: radioCheckOnFreshSession,
+				DuckChunk: func(chunkDur, tail time.Duration) {
+					if audioDucker != nil {
+						audioDucker.SpeakingChunk(chunkDur, tail)
+					}
+				},
+				DuckTail: time.Duration(cfg.AudioDuckingTailMs) * time.Millisecond,
+				OnDriverUtterance: func(text string) {
+					if raceBrain != nil {
+						raceBrain.AppendDriverUtterance(text)
+					}
+				},
 			})
 			if agent != nil {
 				agent.SetArbiter(audioArbiter)
@@ -649,7 +701,13 @@ func main() {
 		defer wg.Done()
 		log.Info().Str("port", cfg.APIPort).Msg("API server starting")
 		if err := server.Start(); err != nil {
-			log.Error().Err(err).Msg("API server error")
+			// Fatal exits the process. A go-core with no HTTP/WS/MCP surface
+			// cannot serve anything useful — keeping it alive only hides the
+			// real failure behind downstream cascades (pi-agent 404 loop
+			// against a stale older instance, vite ws proxy EPIPEs, dead
+			// dashboard). Exit non-zero so `concurrently --kill-others`
+			// tears the rest of the stack down with one clear error.
+			log.Fatal().Err(err).Msg("API server failed to start — exiting")
 		}
 	}()
 
@@ -677,10 +735,35 @@ func main() {
 		log.Error().Err(err).Msg("HTTP shutdown error")
 	}
 
+	// Restore music volume before goroutines drain — once the speaker
+	// goroutines are gone we lose the only thing that would re-issue a
+	// duck/unduck, so doing it now beats leaking a ducked volume on
+	// shutdown.
+	if audioDucker != nil {
+		audioDucker.Stop()
+	}
+
 	// Wait for all goroutines to finish (they flush buffers on exit).
 	wg.Wait()
 
 	log.Info().Msg("Graceful shutdown complete.")
+}
+
+// parseAudioTargets splits the AUDIO_DUCKING_TARGETS config string into
+// a trimmed list. Empty/whitespace-only input yields nil so the
+// platform ducker picks its own defaults (e.g. Spotify+Music on macOS).
+func parseAudioTargets(raw string) []string {
+	if strings.TrimSpace(raw) == "" {
+		return nil
+	}
+	parts := strings.Split(raw, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if t := strings.TrimSpace(p); t != "" {
+			out = append(out, t)
+		}
+	}
+	return out
 }
 
 // fanout distributes translated insights to the dashboard channel, voice

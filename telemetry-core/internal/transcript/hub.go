@@ -9,7 +9,9 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -550,7 +552,27 @@ func (h *Hub) ringSnapshotLocked() []Event {
 	return out
 }
 
+// ResolveScope is the exported form of resolveScope so API handlers can
+// surface the concrete file-id they actually read from, which is critical
+// for debugging "I asked for X but got Y" mismatches when callers hand
+// over a decimal session_uid the hub then has to rewrite to its on-disk
+// `sess_<hex>` form.
+func (h *Hub) ResolveScope(scope string) (string, error) {
+	return h.resolveScope(strings.TrimSpace(scope))
+}
+
 // resolveScope maps "current" / "previous" / "<id>" to a concrete id.
+//
+// For an explicit id we accept three shapes so callers can hand us
+// whatever they have without round-tripping through Sessions():
+//   - sess_<hex>.jsonl filename stem (e.g. "sess_6a4b78d9113c7037") — used as-is
+//   - bare 16-char hex (e.g. "6a4b78d9113c7037") — prefixed with "sess_"
+//   - decimal uint64 (what /api/sessions and the MCP list_sessions tool emit
+//     because JSON can't carry uint64 safely as a number) — converted to
+//     "sess_%016x"
+//
+// Anything else falls through unchanged so existing values like
+// "sess_proc_1778855114" still resolve.
 func (h *Hub) resolveScope(scope string) (string, error) {
 	switch scope {
 	case "current":
@@ -574,8 +596,31 @@ func (h *Hub) resolveScope(scope string) (string, error) {
 		}
 		return "", fmt.Errorf("transcript: no previous session")
 	default:
-		return scope, nil
+		return normalizeSessionScope(scope), nil
 	}
+}
+
+var sessionHex16Re = regexp.MustCompile(`^[0-9a-fA-F]{16}$`)
+var sessionDecimalRe = regexp.MustCompile(`^[0-9]{1,20}$`)
+
+// normalizeSessionScope rewrites a caller-supplied scope into the on-disk
+// file-id form (`sess_<016x>`) when it looks like a session_uid. Anything
+// that already names a file id (e.g. "sess_proc_…", "sess_6a4b…") or
+// doesn't match either uid shape is returned unchanged.
+func normalizeSessionScope(scope string) string {
+	s := strings.TrimSpace(scope)
+	if s == "" || strings.HasPrefix(s, "sess_") {
+		return s
+	}
+	if sessionHex16Re.MatchString(s) {
+		return "sess_" + strings.ToLower(s)
+	}
+	if sessionDecimalRe.MatchString(s) {
+		if uid, err := strconv.ParseUint(s, 10, 64); err == nil {
+			return fmt.Sprintf("sess_%016x", uid)
+		}
+	}
+	return s
 }
 
 // readSession reads every part file for the given id and returns events

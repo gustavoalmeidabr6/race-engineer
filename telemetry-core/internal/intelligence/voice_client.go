@@ -3,10 +3,13 @@ package intelligence
 import (
 	"context"
 	"encoding/base64"
+	"encoding/binary"
 	"strings"
+	"time"
 
 	"github.com/rs/zerolog/log"
 
+	"github.com/tusharbhardwaj/race-engineer/telemetry-core/internal/audio"
 	"github.com/tusharbhardwaj/race-engineer/telemetry-core/internal/models"
 	"github.com/tusharbhardwaj/race-engineer/telemetry-core/internal/voice"
 )
@@ -38,6 +41,9 @@ type VoiceClient struct {
 	// future "let's broadcast a TTS phrase while Live is talking"
 	// regression from going out the door).
 	arbiter *voice.OutputArbiter
+	// ducker, when set, lowers external music player volume for the
+	// duration of each broadcast. Optional — nil = no ducking.
+	ducker *audio.Coordinator
 }
 
 // NewVoiceClient creates a voice client backed by the supplied
@@ -61,6 +67,15 @@ func (vc *VoiceClient) SetArbiter(a *voice.OutputArbiter) {
 		return
 	}
 	vc.arbiter = a
+}
+
+// SetDucker attaches the audio-ducking coordinator so external music
+// players are lowered for the duration of each broadcast. Optional.
+func (vc *VoiceClient) SetDucker(c *audio.Coordinator) {
+	if vc == nil {
+		return
+	}
+	vc.ducker = c
 }
 
 // Run drains the voice channel, synthesizing each insight into audio.
@@ -98,6 +113,9 @@ func (vc *VoiceClient) SynthesizeAck(ctx context.Context) {
 	}
 	if len(audio) == 0 {
 		return
+	}
+	if vc.ducker != nil {
+		vc.ducker.SpeakingFor(audioDuration(audio, mediaType))
 	}
 	encoded := base64.StdEncoding.EncodeToString(audio)
 	vc.hub.BroadcastAudio(encoded, formatFromMIME(mediaType))
@@ -143,6 +161,9 @@ func (vc *VoiceClient) synthesize(ctx context.Context, insight models.DrivingIns
 		}
 		defer release()
 	}
+	if vc.ducker != nil {
+		vc.ducker.SpeakingFor(audioDuration(audio, mediaType))
+	}
 	encoded := base64.StdEncoding.EncodeToString(audio)
 	vc.hub.BroadcastAudio(encoded, formatFromMIME(mediaType))
 	log.Debug().
@@ -150,6 +171,92 @@ func (vc *VoiceClient) synthesize(ctx context.Context, insight models.DrivingIns
 		Int("priority", insight.Priority).
 		Int("audio_bytes", len(audio)).
 		Msg("Audio synthesized and broadcast")
+}
+
+// audioDuration estimates how long the buffer will play. We only need
+// rough accuracy here — the ducker's job is to keep music low through
+// the speech, not to time it to the millisecond. A small fixed tail
+// covers WAV-header overhead, network/playback latency, and the
+// trailing fade so music doesn't pop back too early.
+//
+// WAV path (the GeminiTTS default): read sampleRate/channels/bits from
+// the header and compute from the data chunk size. Non-WAV (mp3, ogg)
+// falls back to a fixed 3 s — we don't pull in a decoder just to time
+// a clip that almost certainly came out of Gemini.
+func audioDuration(buf []byte, mediaType string) time.Duration {
+	const fallback = 3 * time.Second
+	const tail = 400 * time.Millisecond
+	mt := strings.ToLower(mediaType)
+	if mt == "audio/wav" || mt == "audio/x-wav" || mt == "audio/wave" || mt == "" {
+		if d, ok := wavDuration(buf); ok {
+			return d + tail
+		}
+	}
+	return fallback + tail
+}
+
+// wavDuration parses a canonical RIFF/WAVE header. Returns ok=false if
+// the buffer doesn't look like a WAV we can read.
+func wavDuration(buf []byte) (time.Duration, bool) {
+	if len(buf) < 44 {
+		return 0, false
+	}
+	if string(buf[0:4]) != "RIFF" || string(buf[8:12]) != "WAVE" {
+		return 0, false
+	}
+	// Walk chunks looking for "fmt " and "data". Most WAVs from
+	// wrapPCMAsWAV land at fixed offsets but a defensive walk costs
+	// nothing.
+	var (
+		sampleRate    uint32
+		channels      uint16
+		bitsPerSample uint16
+		dataSize      uint32
+		haveFmt, haveData bool
+	)
+	i := 12
+	for i+8 <= len(buf) {
+		id := string(buf[i : i+4])
+		sz := binary.LittleEndian.Uint32(buf[i+4 : i+8])
+		body := i + 8
+		end := body + int(sz)
+		if end > len(buf) {
+			end = len(buf)
+		}
+		switch id {
+		case "fmt ":
+			if end-body >= 16 {
+				channels = binary.LittleEndian.Uint16(buf[body+2 : body+4])
+				sampleRate = binary.LittleEndian.Uint32(buf[body+4 : body+8])
+				bitsPerSample = binary.LittleEndian.Uint16(buf[body+14 : body+16])
+				haveFmt = true
+			}
+		case "data":
+			dataSize = sz
+			haveData = true
+		}
+		// Chunks are word-aligned (1-byte pad if size is odd).
+		next := body + int(sz)
+		if sz%2 == 1 {
+			next++
+		}
+		if next <= i {
+			break
+		}
+		i = next
+		if haveFmt && haveData {
+			break
+		}
+	}
+	if !haveFmt || !haveData || sampleRate == 0 || channels == 0 || bitsPerSample == 0 {
+		return 0, false
+	}
+	bytesPerSec := uint64(sampleRate) * uint64(channels) * uint64(bitsPerSample/8)
+	if bytesPerSec == 0 {
+		return 0, false
+	}
+	secs := float64(dataSize) / float64(bytesPerSec)
+	return time.Duration(secs * float64(time.Second)), true
 }
 
 // formatFromMIME maps the audio MIME the synthesizer returned to the

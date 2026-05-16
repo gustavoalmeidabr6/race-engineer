@@ -34,43 +34,6 @@ interface FieldDef {
   tooltip?: ReactNode;
 }
 
-// MODEL_OPTIONS — provider → list of selectable model IDs. Add new models
-// here as providers ship them; users can still paste an arbitrary value
-// because the per-provider model fields render with a free-text fallback
-// alongside the dropdown.
-const MODEL_OPTIONS: Record<string, FieldOption[]> = {
-  anthropic: [
-    { value: 'claude-opus-4-7', label: 'Claude Opus 4.7 (most capable)' },
-    { value: 'claude-sonnet-4-6', label: 'Claude Sonnet 4.6' },
-    { value: 'claude-sonnet-4-5-20250929', label: 'Claude Sonnet 4.5 (2025-09-29)' },
-    { value: 'claude-haiku-4-5-20251001', label: 'Claude Haiku 4.5 (cheap, fast)' },
-  ],
-  openai: [
-    { value: 'gpt-5', label: 'GPT-5' },
-    { value: 'gpt-5-mini', label: 'GPT-5 mini' },
-    { value: 'gpt-5-codex', label: 'GPT-5 Codex (coding-tuned)' },
-    { value: 'gpt-5-codex-mini', label: 'GPT-5 Codex mini' },
-    { value: 'gpt-4.1', label: 'GPT-4.1' },
-    { value: 'gpt-4.1-mini', label: 'GPT-4.1 mini' },
-    { value: 'gpt-4o', label: 'GPT-4o' },
-    { value: 'gpt-4o-mini', label: 'GPT-4o mini (cheap default)' },
-    { value: 'o3-mini', label: 'o3-mini (reasoning)' },
-    { value: 'o1', label: 'o1 (reasoning)' },
-  ],
-  gemini: [
-    { value: 'gemini-2.5-pro', label: 'Gemini 2.5 Pro' },
-    { value: 'gemini-2.5-flash', label: 'Gemini 2.5 Flash (default)' },
-    { value: 'gemini-2.5-flash-lite', label: 'Gemini 2.5 Flash Lite' },
-    { value: 'gemini-3.1-flash-live-preview', label: 'Gemini 3.1 Flash Live preview' },
-  ],
-  // Anthropic SDK accepts "claude" as an alias in some configs.
-  claude: [
-    { value: 'claude-opus-4-7', label: 'Claude Opus 4.7' },
-    { value: 'claude-sonnet-4-6', label: 'Claude Sonnet 4.6' },
-    { value: 'claude-haiku-4-5-20251001', label: 'Claude Haiku 4.5' },
-  ],
-};
-
 interface SectionDef {
   id: string;
   title: string;
@@ -213,8 +176,7 @@ const SECTIONS: SectionDef[] = [
         key: 'LLM_MODEL',
         label: 'Model override (optional)',
         placeholder: 'leave blank for provider default',
-        help: 'Model list updates to match the chosen provider. Pick "(custom)" to type any model ID.',
-        optionsByProvider: { providerKey: 'LLM_PROVIDER', map: MODEL_OPTIONS },
+        help: 'Type the exact model ID your chosen provider accepts (e.g. claude-opus-4-7, gpt-4o-mini, gemini-3.1-pro-preview). Empty = SDK default.',
       },
       { key: 'GEMINI_API_KEY', label: 'Gemini API key', placeholder: '••••' },
       { key: 'ANTHROPIC_API_KEY', label: 'Anthropic API key', placeholder: '••••' },
@@ -307,22 +269,33 @@ const SECTIONS: SectionDef[] = [
           { value: 'anthropic', label: 'Anthropic (recommended)' },
           { value: 'gemini', label: 'Gemini' },
           { value: 'openai', label: 'OpenAI' },
+          { value: 'custom', label: 'Custom (OpenAI-compatible)' },
         ],
-        help: 'Anthropic is recommended for tool-calling depth. Needs the matching API key in the LLM section above.',
+        help: 'Anthropic is recommended for tool-calling depth. Needs the matching API key in the LLM section above. Pick "Custom" to use any OpenAI chat-completions compatible endpoint (Ollama, vLLM, LiteLLM, OpenRouter, Together, …) — then fill in the Base URL and API key fields below.',
       },
       {
         key: 'PI_AGENT_MODEL',
         label: 'Planner model override',
         placeholder: 'leave blank for provider default',
-        help: 'Model list updates to match the chosen Pi-Agent provider. Empty = SDK default. The planner is the cheap orchestrator that picks which specialist to dispatch.',
-        optionsByProvider: { providerKey: 'PI_AGENT_PROVIDER', map: MODEL_OPTIONS },
+        help: 'Type the exact model ID for the chosen Pi-Agent provider (e.g. claude-opus-4-7, gpt-4o-mini, gemini-3.1-pro-preview, llama3.1:8b for Ollama). Empty = SDK default. The planner is the cheap orchestrator that picks which specialist to dispatch.',
       },
       {
         key: 'PI_AGENT_SPECIALIST_MODEL',
         label: 'Specialist model override',
         placeholder: 'leave blank to reuse planner model',
-        help: 'Empty = same as planner. Specialists do the heavy reasoning per persona (tires / brakes / pace / strategy / weather / energy / driving / responder).',
-        optionsByProvider: { providerKey: 'PI_AGENT_PROVIDER', map: MODEL_OPTIONS },
+        help: 'Empty = same as planner. Type the exact model ID your provider accepts. Specialists do the heavy reasoning per persona (tires / brakes / pace / strategy / weather / energy / driving / responder).',
+      },
+      {
+        key: 'PI_AGENT_BASE_URL',
+        label: 'Custom base URL',
+        placeholder: 'http://localhost:11434/v1',
+        help: 'Only used when Provider = Custom. The OpenAI-compatible endpoint your specialist talks to. Examples: http://localhost:11434/v1 (Ollama), http://localhost:8000/v1 (vLLM / LiteLLM), https://openrouter.ai/api/v1 (OpenRouter).',
+      },
+      {
+        key: 'PI_AGENT_API_KEY',
+        label: 'Custom API key',
+        placeholder: '••••',
+        help: 'API key sent to the custom endpoint. Many local servers (Ollama, vLLM) accept any non-empty string and you can leave this blank — a placeholder is sent automatically.',
       },
       {
         key: 'PI_AGENT_MAX_PRIORITY',
@@ -380,6 +353,49 @@ const SECTIONS: SectionDef[] = [
       { key: 'TRANSCRIPT_PROMPT_LINES', label: 'Prompt lines injected' },
       { key: 'TRANSCRIPT_TOOL_LIMIT', label: 'Tool API default cap' },
       { key: 'TRANSCRIPT_RETENTION_SESSIONS', label: 'Sessions retained' },
+    ],
+  },
+  {
+    id: 'audio',
+    title: 'Audio',
+    description:
+      'Lower the volume of external music players (Spotify, Apple Music, browsers, VLC) while the engineer is speaking, then restore. Restart required after changes.',
+    fields: [
+      {
+        key: 'AUDIO_DUCKING_ENABLED',
+        label: 'Ducking enabled',
+        options: [
+          { value: 'false', label: 'Disabled' },
+          { value: 'true', label: 'Enabled' },
+        ],
+        help: 'Off by default. macOS controls Spotify + Music; Windows uses per-process WASAPI / media key; Linux uses pactl + playerctl.',
+      },
+      {
+        key: 'AUDIO_DUCKING_MODE',
+        label: 'Behaviour',
+        options: [
+          { value: 'duck', label: 'Duck volume (song keeps playing, quieter)' },
+          { value: 'pause', label: 'Pause song (resume when engineer stops)' },
+        ],
+        help: 'Pause keeps the song from progressing while the engineer talks, so you don\'t miss any of it. Pause uses AppleScript on macOS, MPRIS playerctl on Linux, and the global media key on Windows.',
+      },
+      {
+        key: 'AUDIO_DUCKING_LEVEL',
+        label: 'Ducked volume (0.0 – 1.0)',
+        placeholder: '0.3',
+        help: 'Fractional volume players drop to during speech. 0.3 = 30%. Ignored when Behaviour is Pause.',
+      },
+      {
+        key: 'AUDIO_DUCKING_TARGETS',
+        label: 'Target apps',
+        placeholder: 'leave blank for OS defaults',
+        help: 'Comma-separated app names. macOS: Spotify,Music. Windows: spotify.exe,chrome.exe,firefox.exe,msedge.exe,vlc.exe. Linux: spotify,firefox,chromium,vlc.',
+      },
+      {
+        key: 'AUDIO_DUCKING_TAIL_MS',
+        label: 'Tail (ms)',
+        help: 'How long the duck holds after the last Gemini Live audio chunk. Larger = fewer false toggles between chunks, slower restore.',
+      },
     ],
   },
 ];

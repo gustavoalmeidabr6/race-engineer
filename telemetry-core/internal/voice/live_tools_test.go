@@ -184,6 +184,89 @@ func TestHTTPToolHandler_AskDataAnalyst_ValidationErrors(t *testing.T) {
 	}
 }
 
+// When the model hallucinates an event_id (the awaiting-ack section was
+// empty), the ack endpoint returns 404. confirm_event_copy must turn
+// that into a structured tool_result the model can read — not a Go
+// error — and enrich it with the actual awaiting-ack ids from
+// /api/events/pending so the model can self-correct.
+func TestHTTPToolHandler_ConfirmEventCopy_NotFoundReturnsStructuredResult(t *testing.T) {
+	var ackHits, pendingHits int
+	var mu sync.Mutex
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		defer mu.Unlock()
+		switch {
+		case r.Method == "POST" && strings.HasPrefix(r.URL.Path, "/api/events/") && strings.HasSuffix(r.URL.Path, "/ack"):
+			ackHits++
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusNotFound)
+			w.Write([]byte(`{"error":"event: id not in queue"}`))
+		case r.Method == "GET" && r.URL.Path == "/api/events/pending":
+			pendingHits++
+			w.Header().Set("Content-Type", "application/json")
+			w.Write([]byte(`{"queued":[],"in_flight":[],"awaiting_ack":[{"id":"real-1","summary":"box this lap"},{"id":"real-2"}]}`))
+		default:
+			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+
+	h := HTTPToolHandler(srv.URL, time.Second)
+	out, err := h(context.Background(), "confirm_event_copy", map[string]any{
+		"event_id":      "hallucinated-id",
+		"evidence_text": "can you hear me",
+	})
+	if err != nil {
+		t.Fatalf("expected nil error on 404, got %v", err)
+	}
+	m, ok := out.(map[string]any)
+	if !ok {
+		t.Fatalf("expected map result, got %T", out)
+	}
+	if m["ok"] != false {
+		t.Errorf("ok=%v want false", m["ok"])
+	}
+	if m["event_id"] != "hallucinated-id" {
+		t.Errorf("event_id=%v", m["event_id"])
+	}
+	ids, ok := m["current_awaiting_ack_ids"].([]string)
+	if !ok {
+		t.Fatalf("current_awaiting_ack_ids missing or wrong type: %T", m["current_awaiting_ack_ids"])
+	}
+	if len(ids) != 2 || ids[0] != "real-1" || ids[1] != "real-2" {
+		t.Errorf("ids=%v want [real-1 real-2]", ids)
+	}
+	if ackHits != 1 || pendingHits != 1 {
+		t.Errorf("ackHits=%d pendingHits=%d", ackHits, pendingHits)
+	}
+}
+
+// Happy path: a 2xx from the ack endpoint must still pass the body
+// straight back to the model, untouched.
+func TestHTTPToolHandler_ConfirmEventCopy_Success(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != "POST" || r.URL.Path != "/api/events/real-1/ack" {
+			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"status":"acked","event_id":"real-1"}`))
+	}))
+	defer srv.Close()
+
+	h := HTTPToolHandler(srv.URL, time.Second)
+	out, err := h(context.Background(), "confirm_event_copy", map[string]any{
+		"event_id":      "real-1",
+		"evidence_text": "copy that",
+	})
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	m := out.(map[string]any)
+	if m["status"] != "acked" || m["event_id"] != "real-1" {
+		t.Errorf("unexpected body %v", m)
+	}
+}
+
 func TestHTTPToolHandler_UnknownToolRejected(t *testing.T) {
 	h := HTTPToolHandler("http://unreachable", time.Second)
 	_, err := h(context.Background(), "definitely_not_a_tool", nil)
@@ -221,11 +304,14 @@ func TestDefaultLiveTools_ToolCount(t *testing.T) {
 	}
 	// 4 original tools + 5 coaching tools (recent rolling + 4 lap-trace) +
 	// 4 track-position / reminder tools (get_track_position,
-	// set_corner_reminder, list_reminders, cancel_reminder). The reminder
-	// surface was added so "remind me at T8" requests hit the right tool
-	// instead of being silently swallowed as conversational acks.
-	if got := len(tools[0].FunctionDeclarations); got != 13 {
-		t.Errorf("expected 13 function declarations, got %d", got)
+	// set_corner_reminder, list_reminders, cancel_reminder) + 1 spatial-
+	// awareness tool (get_nearby_cars) + 3 driver-copy / question
+	// lifecycle tools (confirm_event_copy, mark_question_addressed,
+	// list_awaiting_ack) + 2 driver-setup tools (get_driver_settings,
+	// get_drs_usage) + 3 cross-session lap-comparison tools
+	// (list_sessions, get_best_lap_at_track, get_lap_snapshot).
+	if got := len(tools[0].FunctionDeclarations); got != 22 {
+		t.Errorf("expected 22 function declarations, got %d", got)
 	}
 	names := map[string]bool{}
 	for _, fn := range tools[0].FunctionDeclarations {
@@ -234,8 +320,11 @@ func TestDefaultLiveTools_ToolCount(t *testing.T) {
 	for _, want := range []string{
 		"get_race_state", "query_brain", "ask_data_analyst", "push_strategy_insight",
 		"get_recent_telemetry",
-		"list_laps", "get_lap_traces", "get_lap_delta", "compare_lap_corners",
+		"list_sessions", "list_laps", "get_lap_traces", "get_lap_delta",
+		"compare_lap_corners", "get_lap_snapshot", "get_best_lap_at_track",
 		"get_track_position", "set_reminder", "list_reminders", "cancel_reminder",
+		"get_nearby_cars",
+		"get_driver_settings", "get_drs_usage",
 	} {
 		if !names[want] {
 			t.Errorf("tool %q missing", want)

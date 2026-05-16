@@ -27,6 +27,7 @@ const (
 	GroupLogging    = "logging"
 	GroupServer     = "server"
 	GroupPiAgent    = "pi_agent"
+	GroupAudio      = "audio"
 )
 
 // Field describes one persistable config key.  Default is the literal value
@@ -108,7 +109,7 @@ var Schema = []Field{
 
 	// --- Gemini Live ---
 	{Key: "GEMINI_LIVE_ENABLED", Kind: KindBool, Default: false, Group: GroupGeminiLive, Help: "Legacy compat: maps to VOICE_MODE=both when VOICE_MODE is empty"},
-	{Key: "GEMINI_LIVE_MODEL", Kind: KindString, Default: "", Group: GroupGeminiLive, Help: "Optional override for the Live API model name"},
+	{Key: "GEMINI_LIVE_MODEL", Kind: KindString, Default: "gemini-3.1-flash-live-preview", Group: GroupGeminiLive, Help: "Optional override for the Live API model name"},
 	{Key: "GEMINI_LIVE_BRAIN_POLL_SEC", Kind: KindInt, Default: 5, Group: GroupGeminiLive, Help: "How often to poll the brain snapshot and push it as context"},
 	{Key: "GEMINI_LIVE_BRAIN_MAX_CHARS", Kind: KindInt, Default: 8000, Group: GroupGeminiLive, Help: "Truncation cap for brain context pushes"},
 	{Key: "GEMINI_LIVE_ANALYST_TIMEOUT", Kind: KindInt, Default: 120, Group: GroupGeminiLive, Help: "Timeout (s) for the ask_data_analyst tool round-trip"},
@@ -127,10 +128,12 @@ var Schema = []Field{
 	// only outward connection is that MCP endpoint. It is event-driven only
 	// (no background ticker) — triggered by /api/analyst/query, lap completion,
 	// or a "significant change" event from the insights engine.
-	{Key: "PI_AGENT_MODE", Kind: KindString, Default: "off", Group: GroupPiAgent, Help: "off | on — when on, start.sh launches pi_agent_service.py and /api/analyst/query routes to the pi-agent trigger queue"},
-	{Key: "PI_AGENT_PROVIDER", Kind: KindString, Default: "anthropic", Group: GroupPiAgent, Help: "anthropic | gemini | openai — LLM provider for pi agent's planner + specialists"},
-	{Key: "PI_AGENT_MODEL", Kind: KindString, Default: "", Group: GroupPiAgent, Help: "Override model for pi agent planner (empty = provider default)"},
-	{Key: "PI_AGENT_SPECIALIST_MODEL", Kind: KindString, Default: "", Group: GroupPiAgent, Help: "Override model for pi agent specialist sub-loops (empty = same as planner)"},
+	{Key: "PI_AGENT_MODE", Kind: KindString, Default: "on", Group: GroupPiAgent, Help: "off | on — when on, start.sh launches pi_agent_service.py and /api/analyst/query routes to the pi-agent trigger queue"},
+	{Key: "PI_AGENT_PROVIDER", Kind: KindString, Default: "gemini", Group: GroupPiAgent, Help: "anthropic | gemini | openai | custom — LLM provider for pi agent's planner + specialists. 'custom' speaks the OpenAI chat-completions protocol and uses PI_AGENT_BASE_URL + PI_AGENT_API_KEY (Ollama, vLLM, LiteLLM, OpenRouter, Together, etc.)."},
+	{Key: "PI_AGENT_MODEL", Kind: KindString, Default: "gemini-3.1-flash-lite", Group: GroupPiAgent, Help: "Override model for pi agent planner (empty = provider default)"},
+	{Key: "PI_AGENT_SPECIALIST_MODEL", Kind: KindString, Default: "gemini-3.1-flash-lite", Group: GroupPiAgent, Help: "Override model for pi agent specialist sub-loops (empty = same as planner)"},
+	{Key: "PI_AGENT_BASE_URL", Kind: KindString, Default: "", Group: GroupPiAgent, Help: "Base URL for the OpenAI-compatible API when PI_AGENT_PROVIDER=custom (e.g. http://localhost:11434/v1 for Ollama, https://openrouter.ai/api/v1)."},
+	{Key: "PI_AGENT_API_KEY", Kind: KindString, Secret: true, Group: GroupPiAgent, Help: "API key for the custom provider (PI_AGENT_PROVIDER=custom). Many local servers accept any non-empty string."},
 	{Key: "PI_AGENT_MAX_PRIORITY", Kind: KindInt, Default: 3, Group: GroupPiAgent, Help: "Cap on push_insight priority (1-5). Higher writes are rejected by the MCP layer."},
 	{Key: "PI_AGENT_MCP_PATH", Kind: KindString, Default: "/mcp", Group: GroupPiAgent, Help: "HTTP path the MCP server is mounted on"},
 	{Key: "PI_AGENT_TRIGGER_TIMEOUT_SEC", Kind: KindInt, Default: 10, Group: GroupPiAgent, Help: "Long-poll timeout (s) for pull_next_trigger before returning empty"},
@@ -141,6 +144,19 @@ var Schema = []Field{
 	{Key: "TRANSCRIPT_PROMPT_LINES", Kind: KindInt, Default: 25, Group: GroupLogging, Help: "Recent transcript events injected into LLM prompts"},
 	{Key: "TRANSCRIPT_TOOL_LIMIT", Kind: KindInt, Default: 200, Group: GroupLogging, Help: "Default cap on /api/transcript pulls"},
 	{Key: "TRANSCRIPT_RETENTION_SESSIONS", Kind: KindInt, Default: 30, Group: GroupLogging, Help: "Session files kept on disk before oldest is rotated"},
+
+	// --- Audio ducking ---
+	// Lower the volume of external music players (Spotify, Apple Music,
+	// browser tabs, VLC, etc.) while the race engineer speaks, then
+	// restore. Cross-platform via per-OS native code:
+	//   macOS  — AppleScript to Spotify + Music (browser tabs unaffected)
+	//   Linux  — pactl set-sink-input-volume (PulseAudio + PipeWire)
+	//   Windows — WASAPI IAudioSessionControl per-process session volume
+	{Key: "AUDIO_DUCKING_ENABLED", Kind: KindBool, Default: false, Group: GroupAudio, Help: "Duck external music players while the engineer is speaking"},
+	{Key: "AUDIO_DUCKING_MODE", Kind: KindString, Default: "duck", Group: GroupAudio, Help: "duck = lower volume to AUDIO_DUCKING_LEVEL; pause = pause the player and resume after (song doesn't progress). pause uses AppleScript on macOS, MPRIS playerctl on Linux, and the system media key on Windows."},
+	{Key: "AUDIO_DUCKING_LEVEL", Kind: KindFloat, Default: 0.3, Group: GroupAudio, Help: "Target volume (0.0-1.0) for ducked players during speech (ignored in pause mode)"},
+	{Key: "AUDIO_DUCKING_TARGETS", Kind: KindString, Default: "", Group: GroupAudio, Help: "Comma-separated app names to duck. Empty = OS default list. macOS: Spotify,Music. Windows: spotify.exe,chrome.exe,firefox.exe,msedge.exe,vlc.exe. Linux: spotify,firefox,chromium,vlc"},
+	{Key: "AUDIO_DUCKING_TAIL_MS", Kind: KindInt, Default: 800, Group: GroupAudio, Help: "Tail-time (ms) after last Live audio chunk before un-ducking. Larger = fewer false toggles, slower restore."},
 }
 
 // schemaIndex is the by-key lookup map.  Built lazily; tests that mutate

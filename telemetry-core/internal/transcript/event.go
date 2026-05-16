@@ -47,9 +47,16 @@ const (
 	// Interrupts-bus event lifecycle. Dispatched when EnqueueEvent
 	// accepts; delivered on a successful AckDelivered; dropped on a final
 	// NackInterrupted past the retry cap.
-	KindEventDispatched Kind = "event_dispatched"
-	KindEventDelivered  Kind = "event_delivered"
-	KindEventDropped    Kind = "event_dropped"
+	KindEventDispatched   Kind = "event_dispatched"
+	KindEventDelivered    Kind = "event_delivered"
+	KindEventDropped      Kind = "event_dropped"
+	// Awaiting-ack lifecycle: an event was spoken but RequiresAck=true is
+	// keeping it in the queue. Acked closes the lifecycle once the driver
+	// copies; nagged is emitted each time the bus re-renders the event
+	// because no copy arrived inside AckNagAfter.
+	KindEventAwaitingAck  Kind = "event_awaiting_ack"
+	KindEventAcked        Kind = "event_acked"
+	KindEventNagged       Kind = "event_nagged"
 
 	// Zerolog stdout mirror. The transcript writer fans every log line
 	// through Append so the Live Debug tab sees the same stream as the
@@ -78,6 +85,9 @@ var AllKinds = []Kind{
 	KindEventDispatched,
 	KindEventDelivered,
 	KindEventDropped,
+	KindEventAwaitingAck,
+	KindEventAcked,
+	KindEventNagged,
 	KindLogDebug,
 	KindLogInfo,
 	KindLogWarn,

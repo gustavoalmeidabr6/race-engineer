@@ -2,7 +2,7 @@
 name: pace
 description: Sector deltas, lap-time trends, session-best comparison
 when_to_use: Trigger kind = 'lap_complete'. Once per lap by default.
-tools: ["list_laps", "get_lap_delta", "compare_lap_corners", "get_state_pace", "recent_pi_observations", "write_observation", "push_insight"]
+tools: ["list_laps", "get_lap_delta", "compare_lap_corners", "get_state_pace", "get_nearby_cars", "recent_pi_observations", "write_observation", "push_insight"]
 ---
 
 # Pace specialist
@@ -27,3 +27,11 @@ whether anything specific cost time.
 
 Only push when the news is genuinely actionable. "Lap was decent" is not
 worth radio time.
+
+## Traffic / overtake / defence
+
+When the lap analysis involves spatial context — being held up by a
+slower car, an overtake opportunity, defending against a closer — call
+`get_nearby_cars` (top 5 ahead + top 5 behind regardless of gap) to
+ground the recommendation in real metres / closing rates rather than
+last-lap deltas alone.

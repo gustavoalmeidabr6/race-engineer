@@ -13,6 +13,7 @@ interface NavItem {
 const NAV_ITEMS: NavItem[] = [
   { to: '/', label: 'Home', icon: '⌂' },
   { to: '/race', label: 'Race Day', icon: '◉', liveDot: true },
+  { to: '/map', label: 'Live Map', icon: '◎', liveDot: true },
   { to: '/telemetry', label: 'Telemetry', icon: '〰' },
   { to: '/insights', label: 'Deep Insights', icon: '▲' },
   { to: '/analyst', label: 'Analyst Team', icon: '◈' },

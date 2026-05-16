@@ -45,6 +45,7 @@ var noisyPollingPaths = map[string]struct{}{
 	"/api/events/next":       {}, // fast-lane (250ms) + idle-lane (1s) dispatchers
 	"/api/events/peek":       {}, // debug; not normally polled but trivially noisy if it is
 	"/api/events/ack":        {}, // dispatcher confirmation per event — also chatty
+	"/api/events/pending":    {}, // Comms Queue panel polls while open
 	"/api/analyst/jobs":      {}, // polled by Gemini Live during ask_data_analyst rounds
 	"/health":                {}, // dashboard + supervisor liveness probes
 	"/api/telemetry/latest":  {}, // dashboard + Live agent's get_race_state tool, sub-second
@@ -86,6 +87,7 @@ func (s *Server) setupRoutes() {
 	// Each returns a decoded, headline-first bundle scoped to one radio topic.
 	// See state_handlers.go for the per-tool field reference.
 	s.app.Get("/api/state/race", raceStateHandler(s.deps))
+	s.app.Get("/api/state/race_phase", racePhaseHandler(s.deps))
 	s.app.Get("/api/state/tires", tiresHandler(s.deps))
 	s.app.Get("/api/state/energy", energyHandler(s.deps))
 	s.app.Get("/api/state/competitors", competitorsHandler(s.deps))
@@ -93,6 +95,9 @@ func (s *Server) setupRoutes() {
 	s.app.Get("/api/state/events", eventsHandler(s.deps))
 	s.app.Get("/api/state/track_position", trackPositionHandler(s.deps))
 	s.app.Get("/api/state/proximity", proximityHandler(s.deps))
+	s.app.Get("/api/state/nearby_cars", nearbyCarsHandler(s.deps))
+	s.app.Get("/api/state/driver_settings", driverSettingsHandler(s.deps))
+	s.app.Get("/api/track/outline", trackOutlineHandler(s.deps))
 
 	// Driver roster (car_index → surname/team/race-number) from Participants packets
 	s.app.Get("/api/roster", rosterHandler(s.deps))
@@ -125,6 +130,9 @@ func (s *Server) setupRoutes() {
 	// Coaching tools — Packages A, B, F of the brake-point plan.
 	s.app.Get("/api/laps/brake_points", brakePointsHandler(s.deps))
 	s.app.Get("/api/laps/brake_balance", brakeBalanceHandler(s.deps))
+	s.app.Get("/api/laps/drs_usage", drsUsageHandler(s.deps))
+	s.app.Get("/api/laps/best_at_track", bestAtTrackHandler(s.deps))
+	s.app.Get("/api/laps/snapshot", lapSnapshotHandler(s.deps))
 	s.app.Get("/api/coaching/corner_report", cornerReportHandler(s.deps))
 	s.app.Get("/api/telemetry/recent", recentTelemetryHandler(s.deps))
 
@@ -177,6 +185,15 @@ func (s *Server) setupRoutes() {
 	s.app.Get("/api/events/peek", eventPeekHandler(s.deps))
 	s.app.Post("/api/events/spoken", eventSpokenHandler(s.deps))
 	s.app.Post("/api/events/ack", eventAckHandler(s.deps))
+	// Driver-copy ack: queued / in-flight / awaiting-ack snapshot, plus
+	// manual confirm / renag (used by the dashboard's Comms Queue panel
+	// and by the live-agent's confirm_event_copy tool).
+	s.app.Get("/api/events/pending", eventsPendingHandler(s.deps))
+	s.app.Post("/api/events/:id/ack", eventConfirmAckHandler(s.deps))
+	s.app.Post("/api/events/:id/nag", eventManualNagHandler(s.deps))
+	// Driver-question lifecycle: flip an OpenDriverQuestion entry to
+	// addressed after the engineer has substantively replied.
+	s.app.Post("/api/driver/questions/addressed", driverQuestionAddressedHandler(s.deps))
 
 	// Transcript — per-session interaction history (voice / engineer / tools).
 	s.app.Post("/api/transcript", transcriptIngestHandler(s.deps))

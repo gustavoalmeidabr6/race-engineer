@@ -47,13 +47,80 @@ type CooldownManager struct {
 	pitWindowOpenNotified bool
 	weatherChangeNotified bool
 	fastestLapNotified    bool
+
+	// --- Race lifecycle latches (race_lifecycle.go) ---
+	// One-shot fires per race. ResetForNewSession (called when SessionUID
+	// changes) clears them so a fresh race re-arms each event.
+	lightsOutNotified   bool
+	finalLapNotified    bool
+	raceFinishNotified  bool
+	lastSessionUID      uint64 // tracked so ResetForNewSession can detect a fresh session
+
+	// --- Setup-advice cooldown (setup_advice.go) ---
+	// Keyed by `<topic>:<target_value>` so a fresh recommendation re-fires
+	// the moment the suggested value changes. Stale entries linger but cost
+	// nothing — the topic list is tiny (≤6 channels × handful of values).
+	setupAdviceLast map[string]time.Time
 }
 
 // NewCooldownManager returns an initialised CooldownManager.
 func NewCooldownManager() *CooldownManager {
 	return &CooldownManager{
-		damageWarned: make(map[string]bool),
+		damageWarned:    make(map[string]bool),
+		setupAdviceLast: make(map[string]time.Time),
 	}
+}
+
+// setupAdviceCooldown is how long any single (topic, target) recommendation
+// is muted after firing. 90s keeps a stable suggestion from spamming the
+// dashboard while still letting the rule re-fire if the target value moves.
+const setupAdviceCooldown = 90 * time.Second
+
+// ShouldSetupAdvise returns true if (topic, target) hasn't fired in the
+// last setupAdviceCooldown window, AND records the new fire time. The
+// keyed-on-target design means a "BB 54" recommendation re-fires the
+// moment the rule recomputes to "BB 53".
+func (c *CooldownManager) ShouldSetupAdvise(topic string, target int) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.setupAdviceLast == nil {
+		c.setupAdviceLast = make(map[string]time.Time)
+	}
+	key := topicTargetKey(topic, target)
+	last, ok := c.setupAdviceLast[key]
+	if ok && time.Since(last) < setupAdviceCooldown {
+		return false
+	}
+	c.setupAdviceLast[key] = time.Now()
+	return true
+}
+
+func topicTargetKey(topic string, target int) string {
+	// Avoid fmt to keep this hot-path allocation-free in the common case.
+	// 32 bytes is plenty for topic + small int.
+	b := make([]byte, 0, 32)
+	b = append(b, topic...)
+	b = append(b, ':')
+	// Manual int → ascii to skip fmt allocations.
+	if target < 0 {
+		b = append(b, '-')
+		target = -target
+	}
+	if target == 0 {
+		b = append(b, '0')
+	} else {
+		var digits [10]byte
+		n := 0
+		for target > 0 {
+			digits[n] = byte('0' + target%10)
+			target /= 10
+			n++
+		}
+		for i := n - 1; i >= 0; i-- {
+			b = append(b, digits[i])
+		}
+	}
+	return string(b)
 }
 
 // ResetForNewLap clears every flag that should reset at the start of a new lap.
@@ -359,6 +426,64 @@ func (c *CooldownManager) SetFastestLapNotified(v bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.fastestLapNotified = v
+}
+
+// ---------- Race Lifecycle ----------
+
+func (c *CooldownManager) LightsOutNotified() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.lightsOutNotified
+}
+
+func (c *CooldownManager) SetLightsOutNotified(v bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.lightsOutNotified = v
+}
+
+func (c *CooldownManager) FinalLapNotified() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.finalLapNotified
+}
+
+func (c *CooldownManager) SetFinalLapNotified(v bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.finalLapNotified = v
+}
+
+func (c *CooldownManager) RaceFinishNotified() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.raceFinishNotified
+}
+
+func (c *CooldownManager) SetRaceFinishNotified(v bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.raceFinishNotified = v
+}
+
+// ResetForNewSession clears every one-shot race-lifecycle latch when a new
+// F1 session is detected. Returns true if the uid changed (caller may want
+// to log the rollover). Idempotent — repeated calls with the same uid are
+// cheap and do nothing.
+func (c *CooldownManager) ResetForNewSession(uid uint64) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if uid == 0 || uid == c.lastSessionUID {
+		return false
+	}
+	c.lastSessionUID = uid
+	c.lightsOutNotified = false
+	c.finalLapNotified = false
+	c.raceFinishNotified = false
+	// Anything else that should reset on a new session goes here. The
+	// per-condition latches (safety car, weather, fastest lap) already
+	// reset when their underlying state clears so they're left alone.
+	return true
 }
 
 // ---------- Pit Entry ----------

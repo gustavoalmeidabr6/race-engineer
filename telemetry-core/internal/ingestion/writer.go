@@ -78,15 +78,26 @@ func stateWriter(
 			// Check for PTT button transitions on BUTN events (packet ID 3).
 			// PTT settings are read fresh on every BUTN packet so dashboard
 			// edits via /api/config land without a restart.
+			//
+			// In live_only mode the entire PTT pipeline is dead code: Gemini
+			// Live uses server-side VAD on the continuous mic stream, STT is
+			// not initialised, and the dashboard explicitly ignores `ptt`
+			// WebSocket frames (see dashboard/src/hooks/useWebSocket.ts).
+			// Skip the bit-twiddling and the chan push so we don't spam
+			// "PTT button pressed" log lines for events nothing acts on.
+			// The button probe stays wired so `buttonwatch` / LogButtons()
+			// still surfaces raw bitmasks for users mapping their wheel.
 			if pkt.PacketID == 3 {
-				pttTrigger := cfg.PTTTrigger()
 				probeButton(pkt.Data, &probePrevStatus, &probeFirst, cfg.LogButtons())
-				if pttButton := cfg.PTTButton(); pttButton != 0 && pttTrigger == "button" {
-					checkPTT(pkt.Data, pttButton, cfg.PTTMode(), &prevButtonStatus, &pttActive, pttChan)
-				}
-				if pttTrigger == "dual" {
-					if start, end := cfg.PTTButtonStart(), cfg.PTTButtonEnd(); start != 0 || end != 0 {
-						checkDualPTT(pkt.Data, start, end, &prevDualStatus, &pttActive, pttChan)
+				if cfg.PTTPathEnabled() {
+					pttTrigger := cfg.PTTTrigger()
+					if pttButton := cfg.PTTButton(); pttButton != 0 && pttTrigger == "button" {
+						checkPTT(pkt.Data, pttButton, cfg.PTTMode(), &prevButtonStatus, &pttActive, pttChan)
+					}
+					if pttTrigger == "dual" {
+						if start, end := cfg.PTTButtonStart(), cfg.PTTButtonEnd(); start != 0 || end != 0 {
+							checkDualPTT(pkt.Data, start, end, &prevDualStatus, &pttActive, pttChan)
+						}
 					}
 				}
 			}
@@ -94,8 +105,9 @@ func stateWriter(
 			// MFD-based PTT: any change in MFDPanelIndex from car_telemetry
 			// (packet 6) is a "press" — driver cycled an MFD page on the wheel.
 			// Reliable because car_telemetry is sampled at 60Hz so every
-			// transition appears in consecutive packets.
-			if pkt.PacketID == 6 && cfg.PTTTrigger() == "mfd" {
+			// transition appears in consecutive packets. Skipped in live_only
+			// for the same reason as the BUTN path above.
+			if pkt.PacketID == 6 && cfg.PTTPathEnabled() && cfg.PTTTrigger() == "mfd" {
 				checkMFDPTT(pkt.Data, cfg.PTTMode(), &prevMFDIndex, &mfdFirst, &pttActive, pttChan)
 			}
 
@@ -138,6 +150,8 @@ func updateState(
 		handleEvent(state, pkt.Data, store, eventHook)
 	case 4: // Participants
 		handleParticipants(pkt.Data, store)
+	case 5: // Car Setup (driver-controllable cockpit + setup-screen channels)
+		handleCarSetup(state, pkt.Data, store, sampleCounters, sampleRate)
 	case 6: // Car Telemetry
 		handleCarTelemetry(state, pkt.Data, store, sampleCounters, sampleRate, hifreqRate)
 	case 7: // Car Status
@@ -146,6 +160,8 @@ func updateState(
 		handleCarDamage(state, pkt.Data, store)
 	case 11: // Session History
 		handleSessionHistory(pkt.Data, store)
+	case 13: // Motion Ex (player-only wheel dynamics)
+		handleMotionEx(state, pkt.Data)
 	}
 }
 
@@ -205,6 +221,24 @@ func handleMotion(state *models.RaceState, data []byte, store *storage.Storage, 
 			Roll:      float64(car.Roll),
 		})
 	}
+}
+
+// handleMotionEx parses the player-only MotionEx packet (id 13) and stashes
+// the per-wheel slip ratio / slip angle arrays into RaceState. The hi-freq
+// writer (in handleCarTelemetry) reads them the next time a hi-freq sample
+// fires, so the slip channels land in the same telemetry_hifreq row as the
+// driver inputs / G-forces. Player-only; no per-car DuckDB row to write.
+func handleMotionEx(state *models.RaceState, data []byte) {
+	pkt, err := packets.Parse(13, data)
+	if err != nil {
+		return
+	}
+	mx, ok := pkt.(*packets.PacketMotionExData)
+	if !ok {
+		return
+	}
+	state.WheelSlipRatio = mx.WheelSlipRatio
+	state.WheelSlipAngle = mx.WheelSlipAngle
 }
 
 func handleSession(state *models.RaceState, data []byte, store *storage.Storage) {
@@ -325,6 +359,7 @@ func handleLapData(state *models.RaceState, data []byte, store *storage.Storage,
 		gp.PitStatus = l.PitStatus
 		gp.DriverStatus = l.DriverStatus
 		gp.ResultStatus = l.ResultStatus
+		gp.NumPitStops = l.NumPitStops
 	}
 
 	// Persist all 22 cars on each sample tick — the analyst, the competitor
@@ -402,8 +437,37 @@ func handleEvent(state *models.RaceState, data []byte, store *storage.Storage, e
 		detail = "retirement"
 	case "SAFC":
 		detail = "safety_car"
+	case "SSTA":
+		detail = "session_started"
+	case "SEND":
+		detail = "session_ended"
+		// Belt-and-braces: if the game emits SEND without a preceding CHQF
+		// (rare — replay/disconnect paths), still flag the race as finished
+		// so emitRaceFinished has something to latch on. We don't know who
+		// crossed the line in what order, so just stamp the current Position.
+		if models.IsRaceSession(state.SessionType) && !state.RaceFinished {
+			state.RaceFinished = true
+			state.FinalClassification = state.Position
+		}
 	case "LGOT":
 		detail = "lights_out"
+	case "CHQF":
+		detail = "chequered_flag"
+		// CHQF is broadcast (no per-vehicle index) — the very first one for
+		// this race marks the leader crossing the line. The player's CHQF
+		// is whenever they themselves cross, which from our state's POV is
+		// the moment Position is locked AND CurrentLap == TotalLaps. We
+		// latch on the first CHQF observed while the player is in the
+		// race; emitRaceFinished gates the actual radio call on
+		// CurrentLap reaching TotalLaps so we don't congratulate P1 with
+		// two laps still to drive.
+		if models.IsRaceSession(state.SessionType) && !state.RaceFinished &&
+			state.TotalLaps > 0 && state.CurrentLap >= state.TotalLaps {
+			state.RaceFinished = true
+			state.FinalClassification = state.Position
+		}
+	case "RCWN":
+		detail = "race_winner"
 	case "OVTK":
 		detail = "overtake"
 	default:
@@ -438,6 +502,30 @@ func handleCarTelemetry(state *models.RaceState, data []byte, store *storage.Sto
 	}
 	ct := telPkt.CarTelemetryData[idx]
 
+	// Accumulate DRS usage windows BEFORE we overwrite the previous DRS
+	// flag. dt is the gap to the prior CarTelemetry packet (~60Hz ⇒ ~16ms).
+	// Reset on lap rollover so the metric is per-lap.
+	if state.LastDRSLap != state.CurrentLap {
+		state.DRSAvailableThisLap = 0
+		state.DRSUsedThisLap = 0
+		state.LastDRSLap = state.CurrentLap
+		state.LastDRSSampleTime = state.SessionTime
+	}
+	if state.LastDRSSampleTime > 0 {
+		dt := state.SessionTime - state.LastDRSSampleTime
+		// Guard against negative dt (session-time reset on respawn / new
+		// session) and absurd gaps (>1s) from a paused session.
+		if dt > 0 && dt < 1.0 {
+			if state.DRSAllowed != 0 {
+				state.DRSAvailableThisLap += dt
+			}
+			if state.DRS != 0 {
+				state.DRSUsedThisLap += dt
+			}
+		}
+	}
+	state.LastDRSSampleTime = state.SessionTime
+
 	state.Speed = ct.Speed
 	state.Throttle = ct.Throttle
 	state.Brake = ct.Brake
@@ -451,6 +539,10 @@ func handleCarTelemetry(state *models.RaceState, data []byte, store *storage.Sto
 	state.TyresInnerTemp = ct.TyresInnerTemperature
 	state.TyresPressure = ct.TyresPressure
 	state.SuggestedGear = telPkt.SuggestedGear
+	// Surface enum per wheel — sampled at the same 60Hz cadence as everything
+	// else in this packet. Stashed on state so the hi-freq writer below picks
+	// it up without re-parsing.
+	state.SurfaceType = ct.SurfaceType
 
 	// Hi-freq player-only sample for the lap-trace + brake-point analysis
 	// tools. Dedicated sentinel ID (201) so it shares no counter with the
@@ -506,6 +598,29 @@ func handleCarTelemetry(state *models.RaceState, data []byte, store *storage.Sto
 			ErsDeployMode:  int(state.ERSDeployMode),
 			Clutch:         int(ct.Clutch),
 			SuggestedGear:  int(telPkt.SuggestedGear),
+			// Driver-setting + DRS-allowed channels. brake_bias is uint8 in
+			// state but stored DOUBLE so per-lap traces can interpolate
+			// across mid-stint tweaks without integer steps.
+			BrakeBias:      float64(state.DriverSettings.BrakeBias),
+			DiffOnThrottle: int(state.DriverSettings.OnThrottleDiff),
+			EngineBraking:  int(state.DriverSettings.EngineBraking),
+			DRSAllowed:     int(state.DRSAllowed),
+			// Sliding + surface. slip values come from MotionEx (packet 13)
+			// landed on state by handleMotionEx; surface comes from this
+			// same CarTelemetry packet (just stashed above). Both are
+			// per-wheel in RL/RR/FL/FR ordering.
+			WheelSlipRatioRL: float64(state.WheelSlipRatio[0]),
+			WheelSlipRatioRR: float64(state.WheelSlipRatio[1]),
+			WheelSlipRatioFL: float64(state.WheelSlipRatio[2]),
+			WheelSlipRatioFR: float64(state.WheelSlipRatio[3]),
+			WheelSlipAngleRL: float64(state.WheelSlipAngle[0]),
+			WheelSlipAngleRR: float64(state.WheelSlipAngle[1]),
+			WheelSlipAngleFL: float64(state.WheelSlipAngle[2]),
+			WheelSlipAngleFR: float64(state.WheelSlipAngle[3]),
+			SurfaceTypeRL:    int(ct.SurfaceType[0]),
+			SurfaceTypeRR:    int(ct.SurfaceType[1]),
+			SurfaceTypeFL:    int(ct.SurfaceType[2]),
+			SurfaceTypeFR:    int(ct.SurfaceType[3]),
 		})
 	}
 
@@ -580,6 +695,17 @@ func handleCarStatus(state *models.RaceState, data []byte, store *storage.Storag
 	state.DRSAllowed = s.DRSAllowed
 	state.VehicleFIAFlags = s.VehicleFIAFlags
 
+	// Mirror compound + tire age into the per-car cache for the live map /
+	// leaderboard. Unconditional so a pit-stop compound swap shows up the
+	// instant the packet lands, not on the next DuckDB sample tick.
+	for i := 0; i < 22; i++ {
+		cs := statusPkt.CarStatusData[i]
+		gp := &state.GridPositions[i]
+		gp.ActualCompound = cs.ActualTyreCompound
+		gp.VisualCompound = cs.VisualTyreCompound
+		gp.TyresAgeLaps = cs.TyresAgeLaps
+	}
+
 	// Persist all 22 cars — competitor compound + tire age + fuel/ERS are
 	// what the analyst and competitor-landscape tool need to reason about
 	// undercut/overcut and stint length. Filter empty AI slots: F1 25 sends
@@ -610,6 +736,128 @@ func handleCarStatus(state *models.RaceState, data []byte, store *storage.Storag
 				PowerMGUK:   float64(cs.EnginePowerMGUK),
 			})
 		}
+	}
+}
+
+// handleCarSetup parses the F1 25 CarSetup packet (ID 5), mirrors the
+// player-car setup channels into state.DriverSettings (always-on; consumed by
+// the brain snapshot and /api/state/driver_settings), records a SettingChange
+// in the recent-changes ring whenever a monitored value differs from the
+// previous packet, and persists all 22 cars on the sampling cadence.
+//
+// CarSetup arrives at ~2Hz natively so storage cost is minimal; we still pass
+// it through the same sample gate as car_status to keep all setup-related
+// tables on a consistent stride.
+func handleCarSetup(state *models.RaceState, data []byte, store *storage.Storage, counters map[uint8]int, rate int) {
+	pkt, err := packets.ParseCarSetupData(data)
+	if err != nil {
+		return
+	}
+	idx := int(pkt.Header.PlayerCarIndex)
+	if idx >= 22 {
+		return
+	}
+
+	prev := state.DriverSettings
+	s := pkt.CarSetups[idx]
+
+	state.DriverSettings.FrontWing = s.FrontWing
+	state.DriverSettings.RearWing = s.RearWing
+	state.DriverSettings.OnThrottleDiff = s.OnThrottle
+	state.DriverSettings.OffThrottleDiff = s.OffThrottle
+	state.DriverSettings.EngineBraking = s.EngineBraking
+	state.DriverSettings.BrakePressure = s.BrakePressure
+	state.DriverSettings.BrakeBias = s.BrakeBias
+	state.DriverSettings.Ballast = s.Ballast
+	state.DriverSettings.FuelLoad = s.FuelLoad
+	state.DriverSettings.FrontLeftTyrePressure = s.FrontLeftTyrePressure
+	state.DriverSettings.FrontRightTyrePressure = s.FrontRightTyrePressure
+	state.DriverSettings.RearLeftTyrePressure = s.RearLeftTyrePressure
+	state.DriverSettings.RearRightTyrePressure = s.RearRightTyrePressure
+	// Preserve the ring buffer fields across the value reassignment above.
+	state.DriverSettings.RecentChanges = prev.RecentChanges
+	state.DriverSettings.RecentChangesLen = prev.RecentChangesLen
+	state.DriverSettings.RecentChangesHead = prev.RecentChangesHead
+
+	// Record meaningful transitions in the recent-changes ring. We only
+	// monitor the channels the analyst + Live agent will reason about, to
+	// keep the ring informative — wing damage / pressures stay off the
+	// monitored list because they don't move mid-stint via cockpit knobs.
+	monitored := []struct {
+		name    string
+		from    int
+		to      int
+	}{
+		{"brake_bias", int(prev.BrakeBias), int(s.BrakeBias)},
+		{"on_throttle_diff", int(prev.OnThrottleDiff), int(s.OnThrottle)},
+		{"off_throttle_diff", int(prev.OffThrottleDiff), int(s.OffThrottle)},
+		{"engine_braking", int(prev.EngineBraking), int(s.EngineBraking)},
+		{"brake_pressure", int(prev.BrakePressure), int(s.BrakePressure)},
+		{"front_wing", int(prev.FrontWing), int(s.FrontWing)},
+		{"rear_wing", int(prev.RearWing), int(s.RearWing)},
+	}
+	// First packet (prev is zero-valued): skip the diff so we don't emit
+	// fake "0 → 56" changes the moment the car appears on track.
+	firstPacket := prev.BrakeBias == 0 && prev.BrakePressure == 0 && prev.OnThrottleDiff == 0
+	if !firstPacket {
+		for _, m := range monitored {
+			if m.from == m.to {
+				continue
+			}
+			head := state.DriverSettings.RecentChangesHead % 8
+			state.DriverSettings.RecentChanges[head] = models.SettingChange{
+				SessionTime: state.SessionTime,
+				Lap:         state.CurrentLap,
+				Channel:     m.name,
+				From:        m.from,
+				To:          m.to,
+			}
+			state.DriverSettings.RecentChangesHead = (head + 1) % 8
+			if state.DriverSettings.RecentChangesLen < 8 {
+				state.DriverSettings.RecentChangesLen++
+			}
+		}
+	}
+
+	if !shouldSample(counters, 5, rate) {
+		return
+	}
+
+	// Persist every active car so the analyst can compare the player's
+	// setup against the field. Skip empty AI slots — F1 25 emits zeroed
+	// rows for inactive grid positions, so a zero fuel_load + zero
+	// brake_bias is a reasonable "no real car here" proxy.
+	for i := 0; i < 22; i++ {
+		cs := pkt.CarSetups[i]
+		if cs.FuelLoad == 0 && cs.BrakeBias == 0 {
+			continue
+		}
+		store.Buffers().CarSetup.Add(storage.CarSetupRow{
+			CarIndex:               i,
+			FrontWing:              int(cs.FrontWing),
+			RearWing:               int(cs.RearWing),
+			OnThrottleDiff:         int(cs.OnThrottle),
+			OffThrottleDiff:        int(cs.OffThrottle),
+			FrontCamber:            float64(cs.FrontCamber),
+			RearCamber:             float64(cs.RearCamber),
+			FrontToe:               float64(cs.FrontToe),
+			RearToe:                float64(cs.RearToe),
+			FrontSuspension:        int(cs.FrontSuspension),
+			RearSuspension:         int(cs.RearSuspension),
+			FrontAntiRollBar:       int(cs.FrontAntiRollBar),
+			RearAntiRollBar:        int(cs.RearAntiRollBar),
+			FrontRideHeight:        int(cs.FrontSuspensionHeight),
+			RearRideHeight:         int(cs.RearSuspensionHeight),
+			BrakePressure:          int(cs.BrakePressure),
+			BrakeBias:              int(cs.BrakeBias),
+			EngineBraking:          int(cs.EngineBraking),
+			RearLeftTyrePressure:   float64(cs.RearLeftTyrePressure),
+			RearRightTyrePressure:  float64(cs.RearRightTyrePressure),
+			FrontLeftTyrePressure:  float64(cs.FrontLeftTyrePressure),
+			FrontRightTyrePressure: float64(cs.FrontRightTyrePressure),
+			Ballast:                int(cs.Ballast),
+			FuelLoad:               float64(cs.FuelLoad),
+		})
 	}
 }
 

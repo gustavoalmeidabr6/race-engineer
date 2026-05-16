@@ -73,6 +73,12 @@ type Reminder struct {
 	Message         string    `json:"message"`
 	Priority        int       `json:"priority"`                // 1-5, default 3
 	Recurring       bool      `json:"recurring"`
+	// RequiresAck — when true, the fired corner_coaching event is held in
+	// the brain Interrupts Bus under StatusAwaitingAck until the driver
+	// verbally copies (see brain.RequiresAck). Used for safety-critical
+	// cues the engineer should re-nag for. Defaults false (most coaching
+	// reminders are advisory).
+	RequiresAck     bool      `json:"requires_ack,omitempty"`
 	ExpiresAtLap    uint8     `json:"expires_at_lap"`
 	LastFiredLap    int16     `json:"last_fired_lap"`          // -1 = never
 	CreatedAt       time.Time `json:"created_at"`
@@ -394,10 +400,11 @@ func buildCornerCoachingEvent(r *Reminder, state *models.RaceState) brain.Event 
 		reasoning = reasoning[:brain.MaxEventReasoningChars]
 	}
 	return brain.Event{
-		Type:      brain.EventCornerCoaching,
-		Priority:  priority,
-		Summary:   summary,
-		Reasoning: reasoning,
+		Type:        brain.EventCornerCoaching,
+		Priority:    priority,
+		Summary:     summary,
+		Reasoning:   reasoning,
+		RequiresAck: r.RequiresAck,
 		DebugData: map[string]any{
 			"reminder_id":    r.ID,
 			"corner_id":      r.CornerID,

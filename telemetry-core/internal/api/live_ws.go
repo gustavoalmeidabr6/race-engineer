@@ -5,6 +5,7 @@ import (
 	cryptorand "crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"strings"
 	"sync"
 	"time"
 
@@ -13,6 +14,19 @@ import (
 
 	"github.com/tusharbhardwaj/race-engineer/telemetry-core/internal/transcript"
 	"github.com/tusharbhardwaj/race-engineer/telemetry-core/internal/voice"
+)
+
+// Supervisor reconnect parameters. The Gemini Live WebSocket occasionally
+// half-closes mid-session (idle timeout, transient server-side eviction,
+// rare 1011 errors). Recovering in-process — without forcing the dashboard
+// tab to reload — keeps proactive radio calls flowing.
+const (
+	liveReconnectInitialBackoff = 500 * time.Millisecond
+	liveReconnectMaxBackoff     = 8 * time.Second
+	// Give up after sustained failure so a misconfigured API key or
+	// permanent Gemini outage surfaces to the dashboard instead of
+	// looping forever.
+	liveReconnectGiveUpAfter = 60 * time.Second
 )
 
 // LiveAgentRunner is the contract live_ws needs from a Gemini Live agent.
@@ -222,13 +236,71 @@ func liveWSHandler(deps *LiveDeps) func(*websocket.Conn) {
 		// agentDone signals when the session terminates so the writer
 		// loop can shut down cleanly. Buffer 1 so the agent goroutine
 		// never blocks on send.
+		//
+		// Supervisor loop: when agent.Run() returns due to a fatal Gemini
+		// WS error (e.g. "websocket: close sent"), we re-Connect in
+		// place with exponential backoff. The dashboard WebSocket stays
+		// open; the user never sees the underlying session churn. We
+		// only stop reconnecting when (a) ctx is cancelled (dashboard
+		// closed or session preempted by another tab), (b) the error is
+		// non-recoverable (missing API key, config), or (c) sustained
+		// failure exceeds liveReconnectGiveUpAfter.
 		agentDone := make(chan error, 1)
 		go func() {
-			agentDone <- agent.Run(ctx)
-			close(audioOut)
-			close(inputText)
-			close(outputText)
-			close(toolEvents)
+			defer func() {
+				close(audioOut)
+				close(inputText)
+				close(outputText)
+				close(toolEvents)
+			}()
+
+			backoff := liveReconnectInitialBackoff
+			var firstFailure time.Time
+			for {
+				runErr := agent.Run(ctx)
+
+				if ctx.Err() != nil {
+					agentDone <- runErr
+					return
+				}
+				if !shouldAutoReconnectLive(runErr) {
+					agentDone <- runErr
+					return
+				}
+
+				if firstFailure.IsZero() {
+					firstFailure = time.Now()
+				} else if time.Since(firstFailure) > liveReconnectGiveUpAfter {
+					log.Error().Err(runErr).Dur("after", time.Since(firstFailure)).
+						Msg("live: reconnect window exhausted; giving up")
+					_ = writeLiveJSONLocked(&writeMu, conn, "error", map[string]any{
+						"reason": "live session unrecoverable: " + runErr.Error(),
+					})
+					agentDone <- runErr
+					return
+				}
+
+				log.Warn().Err(runErr).Dur("backoff", backoff).
+					Msg("live: session ended; reconnecting")
+				_ = writeLiveJSONLocked(&writeMu, conn, "status", map[string]string{
+					"state":  "reconnecting",
+					"reason": runErr.Error(),
+				})
+
+				select {
+				case <-ctx.Done():
+					agentDone <- runErr
+					return
+				case <-time.After(backoff):
+				}
+
+				if backoff < liveReconnectMaxBackoff {
+					backoff *= 2
+					if backoff > liveReconnectMaxBackoff {
+						backoff = liveReconnectMaxBackoff
+					}
+				}
+			}
 		}()
 
 		// (writeMu declared above so the preempt notifier can use it.)
@@ -409,6 +481,38 @@ func writeLiveJSONLocked(mu *sync.Mutex, conn *websocket.Conn, kind string, data
 // Static assertion: *voice.LiveAgent implements LiveAgentRunner. Keeps
 // the interface and implementation in sync.
 var _ LiveAgentRunner = (*voice.LiveAgent)(nil)
+
+// shouldAutoReconnectLive decides whether a Run() error is worth
+// retrying. Network-shaped failures reconnect; configuration / auth
+// failures bubble up so the dashboard can surface the real problem
+// instead of looping silently.
+//
+// nil counts as recoverable: the agent occasionally returns nil when the
+// session ends without an explicit error (e.g. server-initiated graceful
+// close). Treating it as recoverable means the supervisor reconnects;
+// the per-window cap still bounds the retry budget.
+func shouldAutoReconnectLive(err error) bool {
+	if err == nil {
+		return true
+	}
+	msg := err.Error()
+	// Unrecoverable: missing/invalid API key, malformed config, agent
+	// already running. These will fail identically on every retry.
+	for _, marker := range []string{
+		"client unavailable",
+		"missing API key",
+		"already running",
+		"audio arbiter",
+		"API_KEY_INVALID",
+		"PERMISSION_DENIED",
+		"UNAUTHENTICATED",
+	} {
+		if strings.Contains(msg, marker) {
+			return false
+		}
+	}
+	return true
+}
 
 // mirrorToolEventToTranscript writes a tool_call or tool_result row into
 // the transcript so the Live Debug tab can correlate Gemini's tool use

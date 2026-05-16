@@ -109,9 +109,31 @@ CREATE TABLE IF NOT EXISTS motion_data (
     yaw DOUBLE, pitch DOUBLE, roll DOUBLE
 );
 
+-- Table car_setup
+-- Driver-controllable setup channels from F1 25 CarSetup packet (ID 5).
+-- Player-only at ~2Hz native; sampled further by writer. Powers the
+-- "are your current settings appropriate for how you're driving?" analytics
+-- consumed by Live agent + pi-agent setup specialist.
+CREATE TABLE IF NOT EXISTS car_setup (
+    timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    car_index INTEGER,
+    front_wing INTEGER, rear_wing INTEGER,
+    on_throttle_diff INTEGER, off_throttle_diff INTEGER,
+    front_camber DOUBLE, rear_camber DOUBLE,
+    front_toe DOUBLE, rear_toe DOUBLE,
+    front_suspension INTEGER, rear_suspension INTEGER,
+    front_anti_roll_bar INTEGER, rear_anti_roll_bar INTEGER,
+    front_ride_height INTEGER, rear_ride_height INTEGER,
+    brake_pressure INTEGER, brake_bias INTEGER, engine_braking INTEGER,
+    rear_left_tyre_pressure DOUBLE, rear_right_tyre_pressure DOUBLE,
+    front_left_tyre_pressure DOUBLE, front_right_tyre_pressure DOUBLE,
+    ballast INTEGER, fuel_load DOUBLE
+);
+
 -- Table 11: telemetry_hifreq
--- Wide ~10Hz row, player car only, bundling every channel the lap-trace and
--- brake-point coaching tools need so analysis SQL never has to cross-join
+-- Wide ~30Hz row (stride=2 against the 60Hz UDP packets at default
+-- HIFREQ_SAMPLE_RATE), player car only, bundling every channel the lap-trace
+-- and brake-point coaching tools need so analysis SQL never has to cross-join
 -- car_telemetry / car_telemetry_ext / motion_data on timestamp.
 -- Bucketing is performed at query time on track_position; total_distance is
 -- monotonic so it disambiguates samples that straddle the start/finish line.
@@ -145,7 +167,22 @@ CREATE TABLE IF NOT EXISTS telemetry_hifreq (
     ers_store_energy    DOUBLE,
     ers_deploy_mode     INTEGER,
     clutch              INTEGER,
-    suggested_gear      INTEGER
+    suggested_gear      INTEGER,
+    brake_bias          DOUBLE,
+    diff_on_throttle    INTEGER,
+    engine_braking      INTEGER,
+    drs_allowed         INTEGER,
+    -- Per-wheel sliding + surface channels (player-only). slip_ratio /
+    -- slip_angle are sourced from MotionEx (packet 13); surface_type is the
+    -- F1 surface enum from CarTelemetry (0=tarmac, 4=gravel, 7=grass, ...).
+    -- Lets analysis answer "was the car sliding here?" and "did I run wide
+    -- onto grass?" without leaving telemetry_hifreq.
+    wheel_slip_ratio_fl DOUBLE, wheel_slip_ratio_fr DOUBLE,
+    wheel_slip_ratio_rl DOUBLE, wheel_slip_ratio_rr DOUBLE,
+    wheel_slip_angle_fl DOUBLE, wheel_slip_angle_fr DOUBLE,
+    wheel_slip_angle_rl DOUBLE, wheel_slip_angle_rr DOUBLE,
+    surface_type_fl     TINYINT, surface_type_fr TINYINT,
+    surface_type_rl     TINYINT, surface_type_rr TINYINT
 );
 `
 
@@ -166,8 +203,9 @@ func InitSchema(db *sql.DB) error {
 		`ALTER TABLE session_history ADD COLUMN IF NOT EXISTS session_uid UBIGINT`,
 		`CREATE UNIQUE INDEX IF NOT EXISTS idx_session_history_unique ON session_history(session_uid, car_index, lap_num)`,
 		// telemetry_hifreq: widen to cover every channel the live charts and
-		// AI lap-trace tools need at ~10Hz. Old DBs created before these
-		// columns existed must gain them transparently on startup.
+		// AI lap-trace tools need at ~30Hz (stride=2 against the 60Hz F1 25
+		// CarTelemetry packet at default HIFREQ_SAMPLE_RATE). Old DBs created
+		// before these columns existed must gain them transparently on startup.
 		`ALTER TABLE telemetry_hifreq ADD COLUMN IF NOT EXISTS g_force_vert DOUBLE`,
 		`ALTER TABLE telemetry_hifreq ADD COLUMN IF NOT EXISTS tyre_inner_temp_fl INTEGER`,
 		`ALTER TABLE telemetry_hifreq ADD COLUMN IF NOT EXISTS tyre_inner_temp_fr INTEGER`,
@@ -182,6 +220,29 @@ func InitSchema(db *sql.DB) error {
 		`ALTER TABLE telemetry_hifreq ADD COLUMN IF NOT EXISTS ers_deploy_mode INTEGER`,
 		`ALTER TABLE telemetry_hifreq ADD COLUMN IF NOT EXISTS clutch INTEGER`,
 		`ALTER TABLE telemetry_hifreq ADD COLUMN IF NOT EXISTS suggested_gear INTEGER`,
+		// Driver-setting + DRS-allowed channels stamped into hi-freq so
+		// per-lap traces correlate with mid-stint cockpit tweaks and DRS
+		// availability windows. Sourced from RaceState (CarSetup + CarStatus
+		// land on different packets).
+		`ALTER TABLE telemetry_hifreq ADD COLUMN IF NOT EXISTS brake_bias DOUBLE`,
+		`ALTER TABLE telemetry_hifreq ADD COLUMN IF NOT EXISTS diff_on_throttle INTEGER`,
+		`ALTER TABLE telemetry_hifreq ADD COLUMN IF NOT EXISTS engine_braking INTEGER`,
+		`ALTER TABLE telemetry_hifreq ADD COLUMN IF NOT EXISTS drs_allowed INTEGER`,
+		// Slip + surface channels — added so coaching tools can answer
+		// "was I sliding?" and "did I run off track?" without leaving
+		// the hi-freq table. Backfilled NULL for pre-existing rows.
+		`ALTER TABLE telemetry_hifreq ADD COLUMN IF NOT EXISTS wheel_slip_ratio_fl DOUBLE`,
+		`ALTER TABLE telemetry_hifreq ADD COLUMN IF NOT EXISTS wheel_slip_ratio_fr DOUBLE`,
+		`ALTER TABLE telemetry_hifreq ADD COLUMN IF NOT EXISTS wheel_slip_ratio_rl DOUBLE`,
+		`ALTER TABLE telemetry_hifreq ADD COLUMN IF NOT EXISTS wheel_slip_ratio_rr DOUBLE`,
+		`ALTER TABLE telemetry_hifreq ADD COLUMN IF NOT EXISTS wheel_slip_angle_fl DOUBLE`,
+		`ALTER TABLE telemetry_hifreq ADD COLUMN IF NOT EXISTS wheel_slip_angle_fr DOUBLE`,
+		`ALTER TABLE telemetry_hifreq ADD COLUMN IF NOT EXISTS wheel_slip_angle_rl DOUBLE`,
+		`ALTER TABLE telemetry_hifreq ADD COLUMN IF NOT EXISTS wheel_slip_angle_rr DOUBLE`,
+		`ALTER TABLE telemetry_hifreq ADD COLUMN IF NOT EXISTS surface_type_fl TINYINT`,
+		`ALTER TABLE telemetry_hifreq ADD COLUMN IF NOT EXISTS surface_type_fr TINYINT`,
+		`ALTER TABLE telemetry_hifreq ADD COLUMN IF NOT EXISTS surface_type_rl TINYINT`,
+		`ALTER TABLE telemetry_hifreq ADD COLUMN IF NOT EXISTS surface_type_rr TINYINT`,
 	}
 	for _, m := range migrations {
 		if _, err := db.Exec(m); err != nil {

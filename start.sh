@@ -186,20 +186,63 @@ if [ "$NEED_GEMINI_DEPS" = "1" ]; then
 fi
 
 # Pi-agent deps (mcp + LLM SDK). Lazy install on first run with PI_AGENT_MODE
-# set to anything other than "off" / empty.
+# set to anything other than "off" / empty. The marker is per-provider so
+# switching PI_AGENT_PROVIDER between runs installs the new SDK instead of
+# silently reusing the previously-installed one.
 PI_AGENT_MODE="${PI_AGENT_MODE:-off}"
 PI_AGENT_PROVIDER="${PI_AGENT_PROVIDER:-anthropic}"
-if [ "$PI_AGENT_MODE" != "off" ] && [ -n "$PI_AGENT_MODE" ] && [ ! -f "venv/.pi_agent_installed" ]; then
-    echo "Installing pi-agent deps (mcp + provider SDK)..."
+PI_AGENT_INSTALL_MARKER="venv/.pi_agent_installed_${PI_AGENT_PROVIDER}"
+if [ "$PI_AGENT_MODE" != "off" ] && [ -n "$PI_AGENT_MODE" ] && [ ! -f "$PI_AGENT_INSTALL_MARKER" ]; then
+    echo "Installing pi-agent deps (mcp + provider SDK for $PI_AGENT_PROVIDER)..."
     source venv/bin/activate
     pip install -q "mcp>=1.0"
     case "$PI_AGENT_PROVIDER" in
         anthropic|claude) pip install -q anthropic ;;
         gemini)           pip install -q google-genai ;;
-        openai)           pip install -q openai ;;
+        # "custom" speaks the OpenAI chat-completions protocol (Ollama,
+        # vLLM, LiteLLM, OpenRouter, Together, …) — same SDK.
+        openai|custom)    pip install -q openai ;;
     esac
     deactivate
-    touch venv/.pi_agent_installed
+    touch "$PI_AGENT_INSTALL_MARKER"
+fi
+
+# ── Pre-launch cleanup ───────────────────────────────────────────────────
+# Kill any orphans from a previous run BEFORE we build/launch. The
+# cleanup() trap above only fires on graceful Ctrl+C of this script; if a
+# previous run was killed via terminal-close, kill -9, crash, or OOM, the
+# trap never ran and the old processes still hold their ports (especially
+# :8081 / the DuckDB lock on telemetry-core). Without this pre-pass, the
+# new go-core hits "bind: address already in use" but doesn't exit, and
+# the whole stack silently runs against the stale old process — pi-agent
+# 404 loops, vite ws proxy EPIPEs, dead dashboard.
+echo "Killing any orphaned processes from previous runs…"
+pkill -TERM -f "workspace/bin/telemetry-core" 2>/dev/null || true
+pkill -TERM -f "dashboard/node_modules/.bin/vite" 2>/dev/null || true
+pkill -TERM -f "voice_service.py" 2>/dev/null || true
+pkill -TERM -f "gemini_live_service.py" 2>/dev/null || true
+pkill -TERM -f "pi_agent_service.py" 2>/dev/null || true
+sleep 0.5
+pkill -KILL -f "workspace/bin/telemetry-core" 2>/dev/null || true
+pkill -KILL -f "dashboard/node_modules/.bin/vite" 2>/dev/null || true
+pkill -KILL -f "voice_service.py" 2>/dev/null || true
+pkill -KILL -f "gemini_live_service.py" 2>/dev/null || true
+pkill -KILL -f "pi_agent_service.py" 2>/dev/null || true
+
+# Belt-and-suspenders: anything else still bound to :8081 / :8000 / :8092
+# (e.g. the desktop Wails .app's embedded telemetry-core under a different
+# binary path, a stray `go run`, a manually-started vite). Without this,
+# the pattern-based pkill above misses non-checkout binaries that still
+# occupy our ports.
+if command -v lsof >/dev/null 2>&1; then
+    for port in "${API_PORT:-8081}" 8000 8092; do
+        stragglers=$(lsof -ti tcp:"$port" 2>/dev/null || true)
+        if [ -n "$stragglers" ]; then
+            echo "  Force-killing stragglers on :$port: $stragglers"
+            kill -KILL $stragglers 2>/dev/null || true
+        fi
+    done
+    sleep 0.2
 fi
 
 # ── Go builds ────────────────────────────────────────────────────────────

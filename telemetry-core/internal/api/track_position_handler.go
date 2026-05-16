@@ -6,6 +6,7 @@ import (
 	"github.com/gofiber/fiber/v2"
 
 	"github.com/tusharbhardwaj/race-engineer/telemetry-core/internal/models"
+	"github.com/tusharbhardwaj/race-engineer/telemetry-core/internal/state"
 	"github.com/tusharbhardwaj/race-engineer/telemetry-core/internal/trackmap"
 )
 
@@ -51,6 +52,10 @@ type playerPositionView struct {
 	LapDistanceM float32      `json:"lap_distance_m"`
 	SpeedKmh     uint16       `json:"speed_kmh"`
 	World        worldXYZView `json:"world"`
+	// Yaw is the player's heading in radians. F1 25 convention: 0 points
+	// along world +z, CCW positive. The map view rotates by -yaw so the
+	// player's forward direction points up on screen.
+	Yaw          float32      `json:"yaw"`
 	NextCorner   *trackCornerWithDistance `json:"next_corner,omitempty"`
 }
 
@@ -85,6 +90,12 @@ type gridCarView struct {
 	// differences (we are not modelling laps-down here — that comes from
 	// car_position which is already on the entry).
 	AheadOfMeM float32 `json:"ahead_of_me_m"`
+	// Compound + age + pit-stop count come from the in-memory cache so the
+	// live map / leaderboard get them every poll without touching DuckDB.
+	ActualCompound uint8 `json:"actual_tyre_compound"`
+	VisualCompound uint8 `json:"visual_tyre_compound"`
+	TyresAgeLaps   uint8 `json:"tyres_age_laps"`
+	NumPitStops    uint8 `json:"num_pit_stops"`
 }
 
 type trackPositionResponse struct {
@@ -94,115 +105,147 @@ type trackPositionResponse struct {
 	Grid     []gridCarView      `json:"grid"`
 }
 
+// TrackPositionDynamic is the tick-rate slice of track_position: everything
+// that changes per UDP packet. Stable geometry (corners, length, sector
+// boundaries) lives in trackGeometryView and is pushed separately — once
+// per session via REST, not on every WS tick.
+type TrackPositionDynamic struct {
+	Headline string             `json:"headline"`
+	Me       playerPositionView `json:"me"`
+	Grid     []gridCarView      `json:"grid"`
+}
+
+// buildTrackGeometry derives the static track block from a snapshot. Output
+// shape matches the original trackPositionHandler exactly so REST consumers
+// (Live agent, pi agent, curl) see no change.
+func buildTrackGeometry(s *models.RaceState, track *trackmap.TrackInfo) trackGeometryView {
+	g := trackGeometryView{
+		TrackID:       s.TrackID,
+		LengthM:       float32(s.TrackLength),
+		SectorStartsM: []float32{0, s.Sector2DistStart, s.Sector3DistStart},
+		Corners:       []trackCornerView{},
+	}
+	if track != nil {
+		g.Name = track.Name
+		g.Note = track.Note
+		g.Corners = make([]trackCornerView, 0, len(track.Corners))
+		for _, c := range track.Corners {
+			g.Corners = append(g.Corners, trackCornerView{
+				ID:           c.ID,
+				Name:         c.Name,
+				LapDistanceM: c.LapDistanceM,
+				Type:         string(c.Type),
+			})
+		}
+	}
+	return g
+}
+
+// BuildTrackPositionDynamic computes the per-tick player + grid + headline
+// block. Exported so the WebSocket hub can call it on every broadcast tick
+// without re-running the static geometry build.
+func BuildTrackPositionDynamic(s *models.RaceState, track *trackmap.TrackInfo, roster *state.Roster) TrackPositionDynamic {
+	me := s.GridPositions[s.PlayerCarIndex]
+	mePos := playerPositionView{
+		CarIndex:     s.PlayerCarIndex,
+		Position:     me.Position,
+		Lap:          me.CurrentLap,
+		Sector:       me.Sector,
+		LapDistanceM: s.LapDistance,
+		SpeedKmh:     s.Speed,
+		World: worldXYZView{
+			X: s.WorldPosX,
+			Y: s.WorldPosY,
+			Z: s.WorldPosZ,
+		},
+		Yaw: s.Yaw,
+	}
+	if roster != nil {
+		mePos.DriverName = roster.ResolveRadioName(s.PlayerCarIndex)
+	}
+	if track != nil {
+		if next := track.NextCornerAfter(s.LapDistance); next != nil {
+			mePos.NextCorner = &trackCornerWithDistance{
+				ID:             next.ID,
+				Name:           next.Name,
+				LapDistanceM:   next.LapDistanceM,
+				Type:           string(next.Type),
+				DistanceAheadM: lapWrapDelta(s.LapDistance, next.LapDistanceM, float32(s.TrackLength)),
+			}
+		}
+	}
+
+	grid := make([]gridCarView, 0, 22)
+	for i := 0; i < 22; i++ {
+		gp := s.GridPositions[i]
+		if gp.ResultStatus < 2 {
+			continue
+		}
+		gv := gridCarView{
+			CarIndex:     gp.CarIndex,
+			Position:     gp.Position,
+			LapDistanceM: gp.LapDistance,
+			CurrentLap:   gp.CurrentLap,
+			Sector:       gp.Sector,
+			PitStatus:    pitStatusName(gp.PitStatus),
+			DriverStatus: driverStatusName(gp.DriverStatus),
+			World: worldXYZView{
+				X: gp.WorldPosX,
+				Y: gp.WorldPosY,
+				Z: gp.WorldPosZ,
+			},
+			ActualCompound: gp.ActualCompound,
+			VisualCompound: gp.VisualCompound,
+			TyresAgeLaps:   gp.TyresAgeLaps,
+			NumPitStops:    gp.NumPitStops,
+		}
+		if roster != nil {
+			gv.DriverName = roster.ResolveRadioName(gp.CarIndex)
+		}
+		if i != int(s.PlayerCarIndex) {
+			gv.AheadOfMeM = signedTrackDelta(s.LapDistance, gp.LapDistance, float32(s.TrackLength))
+		}
+		grid = append(grid, gv)
+	}
+	sortGridByPosition(grid)
+
+	headline := fmt.Sprintf("P%d on lap %d, sector %d, %.0fm into lap",
+		mePos.Position, mePos.Lap, mePos.Sector+1, mePos.LapDistanceM)
+	if mePos.NextCorner != nil {
+		headline += fmt.Sprintf(" — %s in %.0fm",
+			cornerLabel(*mePos.NextCorner), mePos.NextCorner.DistanceAheadM)
+	}
+
+	return TrackPositionDynamic{
+		Headline: headline,
+		Me:       mePos,
+		Grid:     grid,
+	}
+}
+
 // trackPositionHandler powers GET /api/state/track_position.
 func trackPositionHandler(deps *Deps) fiber.Handler {
 	return func(c *fiber.Ctx) error {
-		state := deps.Store.Cache().Load()
-		if state == nil {
+		s := deps.Store.Cache().Load()
+		if s == nil {
 			return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{
 				"error": "no telemetry yet",
 			})
 		}
 
-		// Resolve track info. Missing entries are normal — we still return
-		// player position + sector boundaries.
 		var track *trackmap.TrackInfo
 		if deps.TrackMap != nil {
-			track = deps.TrackMap.Lookup(state.TrackID)
+			track = deps.TrackMap.Lookup(s.TrackID)
 		}
 
-		// Build geometry view.
-		geometry := trackGeometryView{
-			TrackID:       state.TrackID,
-			LengthM:       float32(state.TrackLength),
-			SectorStartsM: []float32{0, state.Sector2DistStart, state.Sector3DistStart},
-			Corners:       []trackCornerView{},
-		}
-		if track != nil {
-			geometry.Name = track.Name
-			geometry.Note = track.Note
-			geometry.Corners = make([]trackCornerView, 0, len(track.Corners))
-			for _, c := range track.Corners {
-				geometry.Corners = append(geometry.Corners, trackCornerView{
-					ID:           c.ID,
-					Name:         c.Name,
-					LapDistanceM: c.LapDistanceM,
-					Type:         string(c.Type),
-				})
-			}
-		}
-
-		// Resolve player block.
-		roster := deps.Store.Roster()
-		me := state.GridPositions[state.PlayerCarIndex]
-		mePos := playerPositionView{
-			CarIndex:     state.PlayerCarIndex,
-			DriverName:   roster.ResolveRadioName(state.PlayerCarIndex),
-			Position:     me.Position,
-			Lap:          me.CurrentLap,
-			Sector:       me.Sector,
-			LapDistanceM: state.LapDistance,
-			SpeedKmh:     state.Speed,
-			World: worldXYZView{
-				X: state.WorldPosX,
-				Y: state.WorldPosY,
-				Z: state.WorldPosZ,
-			},
-		}
-		if track != nil {
-			if next := track.NextCornerAfter(state.LapDistance); next != nil {
-				mePos.NextCorner = &trackCornerWithDistance{
-					ID:             next.ID,
-					Name:           next.Name,
-					LapDistanceM:   next.LapDistanceM,
-					Type:           string(next.Type),
-					DistanceAheadM: lapWrapDelta(state.LapDistance, next.LapDistanceM, float32(state.TrackLength)),
-				}
-			}
-		}
-
-		// Build grid array, sorted by car_position. Skip inactive slots.
-		grid := make([]gridCarView, 0, 22)
-		for i := 0; i < 22; i++ {
-			gp := state.GridPositions[i]
-			if gp.ResultStatus < 2 {
-				continue
-			}
-			gv := gridCarView{
-				CarIndex:     gp.CarIndex,
-				DriverName:   roster.ResolveRadioName(gp.CarIndex),
-				Position:     gp.Position,
-				LapDistanceM: gp.LapDistance,
-				CurrentLap:   gp.CurrentLap,
-				Sector:       gp.Sector,
-				PitStatus:    pitStatusName(gp.PitStatus),
-				DriverStatus: driverStatusName(gp.DriverStatus),
-				World: worldXYZView{
-					X: gp.WorldPosX,
-					Y: gp.WorldPosY,
-					Z: gp.WorldPosZ,
-				},
-			}
-			if i != int(state.PlayerCarIndex) {
-				gv.AheadOfMeM = signedTrackDelta(state.LapDistance, gp.LapDistance, float32(state.TrackLength))
-			}
-			grid = append(grid, gv)
-		}
-		sortGridByPosition(grid)
-
-		// Headline for fast TL;DR on the agent side.
-		headline := fmt.Sprintf("P%d on lap %d, sector %d, %.0fm into lap",
-			mePos.Position, mePos.Lap, mePos.Sector+1, mePos.LapDistanceM)
-		if mePos.NextCorner != nil {
-			headline += fmt.Sprintf(" — %s in %.0fm",
-				cornerLabel(*mePos.NextCorner), mePos.NextCorner.DistanceAheadM)
-		}
+		geometry := buildTrackGeometry(s, track)
+		dyn := BuildTrackPositionDynamic(s, track, deps.Store.Roster())
 
 		return c.JSON(trackPositionResponse{
-			Headline: headline,
+			Headline: dyn.Headline,
 			Track:    geometry,
-			Me:       mePos,
-			Grid:     grid,
+			Me:       dyn.Me,
+			Grid:     dyn.Grid,
 		})
 	}
 }

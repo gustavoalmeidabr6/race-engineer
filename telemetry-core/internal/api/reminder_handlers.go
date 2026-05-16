@@ -43,6 +43,7 @@ type setReminderRequest struct {
 	Recurring        *bool   `json:"recurring,omitempty"`         // default true (position-based only)
 	ExpiresInLaps    uint8   `json:"expires_in_laps,omitempty"`   // default 5
 	Priority         int     `json:"priority,omitempty"`          // default 3
+	RequiresAck      bool    `json:"requires_ack,omitempty"`      // hold spoken event under StatusAwaitingAck
 }
 
 type setReminderResponse struct {
@@ -235,6 +236,7 @@ func setReminderHandler(deps *Deps) fiber.Handler {
 			Message:        req.Message,
 			Priority:       priority,
 			Recurring:      recurring,
+			RequiresAck:    req.RequiresAck,
 			ExpiresAtLap:   expiresAtLap,
 			LastFiredLap:   -1,
 			CreatedAt:      time.Now(),
@@ -317,6 +319,7 @@ func persistLapReminder(c *fiber.Ctx, deps *Deps, state *models.RaceState, req s
 		Message:      req.Message,
 		Priority:     priority,
 		Recurring:    false, // lap-based is always one-shot
+		RequiresAck:  req.RequiresAck,
 		ExpiresAtLap: expiresAtLap,
 		LastFiredLap: -1,
 		CreatedAt:    time.Now(),

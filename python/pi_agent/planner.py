@@ -68,6 +68,8 @@ class PlannerConfig:
     provider: str = "anthropic"
     model: str = ""
     specialist_model: str = ""
+    base_url: str = ""
+    api_key: str = ""
     poll_timeout_sec: int = 10
     max_concurrent_runs: int = 4
     max_steps: int = 100
@@ -182,19 +184,23 @@ class Planner:
                         persona=persona,
                         provider=self.cfg.provider,
                         model=self.cfg.specialist_model or self.cfg.model,
+                        base_url=self.cfg.base_url,
+                        api_key=self.cfg.api_key,
                         max_steps=self.cfg.max_steps,
                     ),
                 )
+                terminals: set[str] = set()
                 try:
-                    conclusion = await spec.run(trigger)
+                    conclusion, terminals = await spec.run(trigger)
                 except Exception as e:
                     log.exception("run %s: specialist %s crashed", run_id, persona)
                     conclusion = f"specialist error: {e}"
                 duration = time.time() - started
                 log.info(
-                    "run %s done → persona %s duration=%.1fs",
-                    run_id, persona, duration,
+                    "run %s done → persona %s duration=%.1fs terminals=%s",
+                    run_id, persona, duration, sorted(terminals),
                 )
+                await self._ensure_query_answered(trigger, conclusion, terminals)
                 await self._record_thinking(persona, trigger, conclusion, duration)
         finally:
             current_run_id.reset(run_tok)
@@ -209,6 +215,62 @@ class Planner:
         if jid:
             return "run_" + jid.replace("anq_", "")
         return "run_" + secrets.token_hex(4)
+
+    async def _ensure_query_answered(
+        self,
+        trigger: dict[str, Any],
+        conclusion: str,
+        terminals: set[str],
+    ) -> None:
+        """Backstop for query triggers the specialist forgot to answer.
+
+        Why this exists: when the model loop exits with an empty turn (no
+        text, no tool calls) the specialist returns "(no answer)" and the
+        job_id stays in /api/analyst/jobs forever. Gemini Live keeps
+        polling and the driver hears nothing. Fire a graceful fallback
+        submit_query_answer so the contract is always met.
+        """
+        if trigger.get("kind") != "query":
+            return
+        if "submit_query_answer" in terminals:
+            return
+        job_id = (trigger.get("job_id") or "").strip()
+        if not job_id:
+            return
+        # Use whatever the specialist did produce as the answer body so we
+        # surface useful text when it exists; otherwise apologise honestly.
+        # The error/marker strings below are internal diagnostics — never
+        # leak them to the driver.
+        answer = (conclusion or "").strip()
+        unhelpful_markers = (
+            "(no answer)",
+            "(max steps reached",
+            "(completed:",
+            "specialist error:",
+            "unsupported provider:",
+            "anthropic SDK not installed",
+            "google-genai SDK not installed",
+            "openai SDK not installed",
+            "openai error:",
+        )
+        if not answer or any(answer.startswith(m) or answer == m for m in unhelpful_markers):
+            answer = (
+                "I wasn't able to put together a clear answer for that "
+                "question. Try rephrasing it or asking about a specific "
+                "lap or session."
+            )
+        try:
+            await self.client.call(
+                "submit_query_answer",
+                {
+                    "job_id": job_id,
+                    "answer": answer[:2000],
+                    "urgent": bool(trigger.get("urgent")),
+                },
+            )
+            log.info("query %s: fallback answer submitted (specialist did not call submit_query_answer)", job_id)
+        except Exception:
+            log.exception("query %s: fallback submit_query_answer failed", job_id)
 
     async def _record_thinking(
         self,
@@ -259,6 +321,8 @@ def from_env() -> PlannerConfig:
         provider=os.environ.get("PI_AGENT_PROVIDER", "anthropic"),
         model=os.environ.get("PI_AGENT_MODEL", ""),
         specialist_model=os.environ.get("PI_AGENT_SPECIALIST_MODEL", ""),
+        base_url=os.environ.get("PI_AGENT_BASE_URL", ""),
+        api_key=os.environ.get("PI_AGENT_API_KEY", ""),
         poll_timeout_sec=timeout,
         max_concurrent_runs=max(1, max_runs),
         max_steps=max(1, max_steps),

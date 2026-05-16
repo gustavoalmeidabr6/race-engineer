@@ -8,6 +8,7 @@ import { RequiredSettingsBanner } from './components/RequiredSettingsBanner';
 import { ServerGate } from './components/ServerGate';
 import Home from './pages/Home';
 import RaceDay from './pages/RaceDay';
+import LiveMap from './pages/LiveMap';
 import Telemetry from './pages/Telemetry';
 import DeepInsights from './pages/DeepInsights';
 import LiveDebug from './pages/LiveDebug';
@@ -63,6 +64,7 @@ function App() {
               <Routes>
                 <Route path="/" element={<Home />} />
                 <Route path="/race" element={<RaceDay />} />
+                <Route path="/map" element={<LiveMap />} />
                 <Route path="/telemetry" element={<Telemetry />} />
                 <Route path="/insights" element={<DeepInsights />} />
                 <Route path="/analyst" element={<AnalystTeam />} />

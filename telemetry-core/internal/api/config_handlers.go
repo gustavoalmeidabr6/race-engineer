@@ -113,6 +113,18 @@ var keyRegistry = map[string]configKey{
 	"TRANSCRIPT_PROMPT_LINES":       {Section: "logging", Kind: kindStatic, Type: "int"},
 	"TRANSCRIPT_TOOL_LIMIT":         {Section: "logging", Kind: kindStatic, Type: "int"},
 	"TRANSCRIPT_RETENTION_SESSIONS": {Section: "logging", Kind: kindStatic, Type: "int"},
+
+	// --- Audio ducking ---
+	// Static: changing the level/targets means rebuilding the Ducker,
+	// so a restart is the simpler path. The dashboard surfaces the
+	// yellow "restart required" badge automatically for kindStatic.
+	// AUDIO_DUCKING_LEVEL is stored as "string" because keyRegistry has
+	// no float Type — same workaround as CORNER_REMINDER_DEFAULT_LOOKAHEAD_SEC.
+	"AUDIO_DUCKING_ENABLED": {Section: "audio", Kind: kindStatic, Type: "bool"},
+	"AUDIO_DUCKING_MODE":    {Section: "audio", Kind: kindStatic, Type: "string"},
+	"AUDIO_DUCKING_LEVEL":   {Section: "audio", Kind: kindStatic, Type: "string"},
+	"AUDIO_DUCKING_TARGETS": {Section: "audio", Kind: kindStatic, Type: "string"},
+	"AUDIO_DUCKING_TAIL_MS": {Section: "audio", Kind: kindStatic, Type: "int"},
 }
 
 // configResponse is the JSON returned by GET /api/config. The values map is

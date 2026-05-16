@@ -138,7 +138,7 @@ func (e *Engine) emitClosingThreat(state *models.RaceState, talkLevel int32) {
 	}
 	// Race sessions only — same reason as emitOvertaken. The car at "P+1"
 	// in practice may be on the other side of the circuit on a totally
-	// different program. EventCarApproaching covers the proximity case
+	// different program. EventTrafficUpdate covers the proximity case
 	// for non-race sessions using actual on-track distance.
 	if !isRaceSession(state.SessionType) {
 		e.gapBehindSamples = nil

@@ -32,26 +32,45 @@ const (
 	EventFastestLap     EventType = "fastest_lap"     // P2 — FTLP packet
 	EventCornerCoaching EventType = "corner_coaching" // P3 — agent-set track-position reminder fired
 	EventAnalystAnswer  EventType = "analyst_answer"  // P3 (P4 urgent) — pi_agent answered a fire-and-forget ask_data_analyst query
-	EventCarApproaching EventType = "car_approaching" // P2 — courtesy heads-up: car behind closing on track distance
+	EventTrafficUpdate  EventType = "traffic_update"  // P2 — unified spatial awareness: top 5 ahead + top 5 behind with closing rates. Fires when any car closes within ~5s TTI in either direction.
+	EventPositionChange EventType = "position_change" // P3 — silent ground-truth: player Position number changed (any direction, any session). Voiced calls remain on EventOvertaken (P5, race only); this one is context for the Live agent.
+	EventFuelCritical   EventType = "fuel_critical"   // P4 — voiced. FuelRemainingLaps below the critical threshold; driver may not finish the race on current fuel.
+	EventFuelRate       EventType = "fuel_rate"       // P2 — silent context. Sustained high fuel burn rate over the trend window; LLM can mention if relevant.
 	EventPlanReminder   EventType = "plan_reminder"   // P3 — entering the lap of a planned action (e.g., pit stop)
 	EventPlanImminent   EventType = "plan_imminent"   // P4 — N metres before the spatial trigger of a planned action
 	EventPlanWindowOpen EventType = "plan_window_open"  // P3 — lap_window trigger entered
 	EventPlanWindowClose EventType = "plan_window_close" // P3 — lap_window trigger exited
 	EventInfo           EventType = "info"            // P1 — generic analyst note
+	// Setup-advisory events: silent (P2–P3) context the Live agent may voice
+	// at its discretion. Sourced from the rule engine's setup_advice
+	// producers and the pi-agent setup specialist. Each carries the current
+	// setting value + suggested target in DebugData so the engineer can
+	// phrase a concrete radio call ("BB 56% — try 54").
+	EventSetupAdvice EventType = "setup_advice" // P3
+
+	// Race-lifecycle events. Fired once per race by the insight engine off
+	// CHQF / LGOT packet codes + lap math. Phase-transition events are
+	// exempt from the "Recent Radio" dedup guard — the engineer MUST voice
+	// "you won" even if a position_change for P1 was already spoken earlier.
+	EventLightsOut    EventType = "lights_out"    // P5 — race start moment, voiced as urgent
+	EventFinalLap     EventType = "final_lap"     // P4 — CurrentLap == TotalLaps rollover
+	EventRaceFinished EventType = "race_finished" // P5 — CHQF observed, non-podium framing
+	EventPodium       EventType = "podium"        // P5 — CHQF observed AND finished P1/P2/P3
 )
 
 // DefaultEventPriority returns the canonical priority for a given event type.
 // Producers may override per-event but should rarely need to.
 func DefaultEventPriority(t EventType) int {
 	switch t {
-	case EventRedFlag, EventBoxNow, EventOvertaken:
+	case EventRedFlag, EventBoxNow, EventOvertaken, EventLightsOut, EventRaceFinished, EventPodium:
 		return 5
-	case EventSafetyCar, EventVSC, EventYellowFlag, EventCollisionAhead, EventPlanImminent:
+	case EventSafetyCar, EventVSC, EventYellowFlag, EventCollisionAhead, EventPlanImminent, EventFuelCritical, EventFinalLap:
 		return 4
 	case EventThreatOvertake, EventPitWindowOpen, EventTireCliff, EventWeatherChange, EventCornerCoaching,
-		EventPlanReminder, EventPlanWindowOpen, EventPlanWindowClose, EventAnalystAnswer:
+		EventPlanReminder, EventPlanWindowOpen, EventPlanWindowClose, EventAnalystAnswer, EventPositionChange,
+		EventSetupAdvice:
 		return 3
-	case EventLapSummary, EventSectorPB, EventFastestLap, EventCarApproaching:
+	case EventLapSummary, EventSectorPB, EventFastestLap, EventTrafficUpdate, EventFuelRate:
 		return 2
 	case EventInfo:
 		return 1
@@ -101,18 +120,53 @@ func maxReasoningCharsFor(t EventType) int {
 
 // EventStatus tracks the lifecycle of an event in the queue.
 //
-//	queued     — sitting in the bus, eligible to be leased
-//	in_flight  — leased to a dispatcher, awaiting delivery confirmation
-//	delivered  — terminal; only ever set on the in-memory copy returned to
-//	             callers. Delivered events are removed from the queue, so
-//	             this status is rarely observed in PeekEvents.
+//	queued        — sitting in the bus, eligible to be leased
+//	in_flight     — leased to a dispatcher, awaiting delivery confirmation
+//	awaiting_ack  — spoken once but RequiresAck=true; held in the queue
+//	                until the driver verbally copies, ReapAwaitingAcks
+//	                flips it back to queued (a re-nag), or MaxAckNags is
+//	                exceeded.
+//	delivered     — terminal; only ever set on the in-memory copy returned
+//	                to callers. Delivered events are removed from the queue,
+//	                so this status is rarely observed in PeekEvents.
 type EventStatus string
 
 const (
-	StatusQueued    EventStatus = "queued"
-	StatusInFlight  EventStatus = "in_flight"
-	StatusDelivered EventStatus = "delivered"
+	StatusQueued       EventStatus = "queued"
+	StatusInFlight     EventStatus = "in_flight"
+	StatusAwaitingAck  EventStatus = "awaiting_ack"
+	StatusDelivered    EventStatus = "delivered"
 )
+
+// AckNagAfter is the quiet-period before an awaiting-ack event auto-renags.
+// MaxAckNags caps total redeliveries (the original speak counts as #1, so
+// MaxAckNags=2 means: speak → silence → renag → silence → drop).
+const (
+	AckNagAfter = 20 * time.Second
+	MaxAckNags  = 2
+)
+
+// DefaultRequiresAck returns the producer-default for whether the event
+// type should be held in the queue until the driver acknowledges it.
+// Producers may override per-event but should rarely need to.
+//
+// Require ack: tactical calls the driver MUST hear and act on
+// (pit calls, planned-action reminders, tire-cliff alerts).
+//
+// No ack needed: cheap, frequent, or already-known facts (lap summaries,
+// traffic_update, fastest_lap, generic info).
+func DefaultRequiresAck(t EventType) bool {
+	switch t {
+	case EventBoxNow,
+		EventPlanReminder,
+		EventPlanImminent,
+		EventPlanWindowOpen,
+		EventTireCliff:
+		return true
+	default:
+		return false
+	}
+}
 
 // Event is one item on the Interrupts Bus. Producers fill summary, reasoning,
 // and debug_data with FACTS — never radio sentences. The Live agent (Gemini)
@@ -145,6 +199,21 @@ type Event struct {
 	Attempts   int           `json:"attempts,omitempty"`
 	LastNackAt time.Time     `json:"last_nack_at,omitempty"`
 	StaleAfter time.Duration `json:"stale_after,omitempty"`
+
+	// RequiresAck — producer-set. When true, AckDelivered does NOT remove
+	// the event; it flips to StatusAwaitingAck and waits for the driver to
+	// verbally copy (via ConfirmAck) before discharge. ReapAwaitingAcks
+	// renags after AckNagAfter; MaxAckNags caps total redeliveries.
+	RequiresAck bool `json:"requires_ack,omitempty"`
+
+	// AwaitingAckSince is the time the event entered StatusAwaitingAck.
+	// Used by ReapAwaitingAcks to decide when to renag.
+	AwaitingAckSince time.Time `json:"awaiting_ack_since,omitempty"`
+
+	// NagCount is the number of re-emits while awaiting copy. Capped by
+	// MaxAckNags. Reset is implicit — once acked/dropped the event leaves
+	// the queue entirely.
+	NagCount int `json:"nag_count,omitempty"`
 }
 
 // Validate checks the producer-supplied fields against the contract caps.
@@ -216,6 +285,30 @@ func MaxAttemptsForPriority(p int) int {
 	return MaxAttemptsNonUrgent
 }
 
+// Well-known nack reasons. The bus uses these to identify failures where
+// retrying immediately into the same dead consumer is pointless — those
+// short-circuit the per-priority retry budget so we don't burn 3 attempts
+// in a single second while the consumer reconnects.
+const (
+	NackReasonSendClientContentFailed = "send_client_content_failed"
+	NackReasonNoConsumer              = "no_consumer"
+	NackReasonSessionDead             = "session_dead"
+)
+
+// isDeadConsumerReason returns true when the nack reason indicates the
+// downstream is gone, not a transient delivery failure. The bus collapses
+// these to an immediate drop so the queue doesn't churn during reconnect.
+func isDeadConsumerReason(reason string) bool {
+	switch reason {
+	case NackReasonSendClientContentFailed,
+		NackReasonNoConsumer,
+		NackReasonSessionDead:
+		return true
+	default:
+		return false
+	}
+}
+
 // DefaultStaleAfter returns the per-type TTL applied at lease time when the
 // event's StaleAfter is zero. Time-sensitive events (lap_summary, proximity,
 // closing threats) expire so a delayed retry doesn't say something that's
@@ -225,7 +318,7 @@ func DefaultStaleAfter(t EventType) time.Duration {
 	switch t {
 	case EventBoxNow, EventRedFlag, EventSafetyCar, EventVSC, EventYellowFlag:
 		return 0
-	case EventCarApproaching:
+	case EventTrafficUpdate:
 		return 15 * time.Second
 	case EventThreatOvertake, EventCollisionAhead:
 		return 30 * time.Second
@@ -233,6 +326,20 @@ func DefaultStaleAfter(t EventType) time.Duration {
 		return 90 * time.Second
 	case EventOvertaken:
 		return 30 * time.Second
+	case EventPositionChange:
+		// Silent context event — the position number is only useful while
+		// it's current. After 30s a stale "you moved to P4" call would
+		// confuse the model if positions have shifted again.
+		return 30 * time.Second
+	case EventFuelCritical:
+		// Fuel state changes slowly but a stale "critical fuel" call after
+		// 60s is misleading if the driver already started saving and
+		// recovered the margin.
+		return 60 * time.Second
+	case EventFuelRate:
+		// Burn-rate trend is a 25s-window observation; double that as the
+		// useful shelf life.
+		return 60 * time.Second
 	case EventPlanImminent:
 		// Pit-entry warning is only useful for the few seconds before the
 		// driver crosses the entry point. After that the moment has

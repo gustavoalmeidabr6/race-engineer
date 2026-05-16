@@ -2,11 +2,13 @@ import { createContext, useContext, type ReactNode } from 'react';
 import { useWebSocket } from '../hooks/useWebSocket';
 import type { RaceState } from '../types/telemetry';
 import type { HealthStatus } from '../types/settings';
+import type { TrackPositionDynamic } from '../types/trackPosition';
 
 interface WebSocketContextValue {
   state: RaceState | null;
   connected: boolean;
   health: HealthStatus | null;
+  trackPos: TrackPositionDynamic | null;
 }
 
 const WebSocketContext = createContext<WebSocketContextValue | null>(null);

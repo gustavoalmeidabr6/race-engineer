@@ -21,11 +21,21 @@ func BuildContext(state *models.RaceState) string {
 
 	var parts []string
 
-	// Session identity
+	// Session identity. For race sessions we surface the derived phase + laps
+	// remaining alongside the raw lap count so the LLM never has to guess
+	// whether this is the formation lap, mid-race, or the final lap.
 	track := trackName(int(state.TrackID))
 	sessType := sessionTypeName(int(state.SessionType))
-	parts = append(parts, fmt.Sprintf("SESSION: %s at %s, Lap %d/%d",
-		sessType, track, state.CurrentLap, state.TotalLaps))
+	if models.IsRaceSession(state.SessionType) {
+		parts = append(parts, fmt.Sprintf(
+			"SESSION: %s at %s, Lap %d/%d (%d to go) [phase: %s]",
+			sessType, track, state.CurrentLap, state.TotalLaps,
+			state.LapsRemaining(), state.Phase(),
+		))
+	} else {
+		parts = append(parts, fmt.Sprintf("SESSION: %s at %s, Lap %d/%d",
+			sessType, track, state.CurrentLap, state.TotalLaps))
+	}
 
 	// Position & gaps
 	parts = append(parts, fmt.Sprintf("Position: P%d (started P%d), Pit stops: %d",

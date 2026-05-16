@@ -78,6 +78,29 @@ var allowedTraceChannels = map[string]hifreqChannel{
 	"fuel":             {id: "fuel", column: "fuel_in_tank", scale: 1},
 	"ers_store":        {id: "ers_store", column: "ers_store_energy", scale: 1},
 	"ers_deploy_mode":  {id: "ers_deploy_mode", column: "ers_deploy_mode", scale: 1},
+	// Sliding diagnostics — wheel slip ratio (longitudinal slip; spin/lock)
+	// and slip angle (lateral slip; understeer/oversteer). 4-wheel averages
+	// for the headline shape; per-wheel breakouts for asymmetry analysis
+	// (e.g. inside-rear spin under power). Stored as DOUBLE; positive slip
+	// ratio = drive wheel spinning up, negative = locking under braking.
+	"slip_ratio":       {id: "slip_ratio", column: "(wheel_slip_ratio_fl+wheel_slip_ratio_fr+wheel_slip_ratio_rl+wheel_slip_ratio_rr)/4.0", scale: 1},
+	"slip_angle":       {id: "slip_angle", column: "(wheel_slip_angle_fl+wheel_slip_angle_fr+wheel_slip_angle_rl+wheel_slip_angle_rr)/4.0", scale: 1},
+	"slip_ratio_fl":    {id: "slip_ratio_fl", column: "wheel_slip_ratio_fl", scale: 1},
+	"slip_ratio_fr":    {id: "slip_ratio_fr", column: "wheel_slip_ratio_fr", scale: 1},
+	"slip_ratio_rl":    {id: "slip_ratio_rl", column: "wheel_slip_ratio_rl", scale: 1},
+	"slip_ratio_rr":    {id: "slip_ratio_rr", column: "wheel_slip_ratio_rr", scale: 1},
+	"slip_angle_fl":    {id: "slip_angle_fl", column: "wheel_slip_angle_fl", scale: 1},
+	"slip_angle_fr":    {id: "slip_angle_fr", column: "wheel_slip_angle_fr", scale: 1},
+	"slip_angle_rl":    {id: "slip_angle_rl", column: "wheel_slip_angle_rl", scale: 1},
+	"slip_angle_rr":    {id: "slip_angle_rr", column: "wheel_slip_angle_rr", scale: 1},
+	// Surface enum per wheel (0=tarmac, 1=rumblestrip, 4=gravel, 7=grass, …).
+	// MAX picks the worst surface any wheel was on across the bucket so the
+	// trace flags off-track moments even if one wheel stayed on tarmac.
+	"surface":    {id: "surface", column: "GREATEST(surface_type_fl, surface_type_fr, surface_type_rl, surface_type_rr)", scale: 1},
+	"surface_fl": {id: "surface_fl", column: "surface_type_fl", scale: 1},
+	"surface_fr": {id: "surface_fr", column: "surface_type_fr", scale: 1},
+	"surface_rl": {id: "surface_rl", column: "surface_type_rl", scale: 1},
+	"surface_rr": {id: "surface_rr", column: "surface_type_rr", scale: 1},
 }
 
 type traceLap struct {
@@ -311,11 +334,15 @@ type compareResponse struct {
 	LapTimeMs     int             `json:"lap_time_ms,omitempty"`
 	BestLap       int             `json:"best_lap"`
 	BestLapTimeMs int             `json:"best_lap_time_ms"`
-	DeltaTotalMs  int             `json:"delta_total_ms"`
-	WindowBeforeM float64         `json:"window_before_m"`
-	WindowAfterM  float64         `json:"window_after_m"`
-	Corners       []cornerCompare `json:"corners"`
-	Note          string          `json:"note,omitempty"`
+	// BestLapSessionUID is set only when the baseline came from a different
+	// session via ?reference_session_uid=. Empty for same-session compares
+	// (back-compat with dashboards that read the flat shape).
+	BestLapSessionUID string          `json:"best_lap_session_uid,omitempty"`
+	DeltaTotalMs      int             `json:"delta_total_ms"`
+	WindowBeforeM     float64         `json:"window_before_m"`
+	WindowAfterM      float64         `json:"window_after_m"`
+	Corners           []cornerCompare `json:"corners"`
+	Note              string          `json:"note,omitempty"`
 }
 
 // brakePointMinSamples is how many consecutive samples must show brake
@@ -327,6 +354,9 @@ const brakePointThreshold = 0.10
 // lapCompareHandler powers GET /api/laps/compare.
 // Accepts ?session_uid= for historical analysis (Deep Insights). When absent
 // the live cache state is used (Race Day live coaching).
+// Optional ?reference_session_uid= + ?reference_lap= pull the best-lap
+// baseline from a different (same-track) session — enables "compare today's
+// lap to my best ever at this track".
 func lapCompareHandler(deps *Deps) fiber.Handler {
 	return func(c *fiber.Ctx) error {
 		ctx := newLapCtx(c, deps)
@@ -339,6 +369,14 @@ func lapCompareHandler(deps *Deps) fiber.Handler {
 		trackLen := float64(state.trackLength)
 		uid := state.sessionUID
 		carIdx := state.playerCarIndex
+
+		// Optional cross-session baseline. Same track-length guard as
+		// /api/laps/delta — the brake-point and apex windows assume the
+		// corners line up at the same lap_distance.
+		refUID, refCar, err := resolveCrossSession(c, deps, "reference_session_uid", uid, carIdx, trackLen)
+		if err != nil {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
+		}
 
 		// Resolve the lap to compare. Default = most recent completed lap.
 		lapStr := c.Query("lap")
@@ -366,11 +404,29 @@ func lapCompareHandler(deps *Deps) fiber.Handler {
 			your = n
 		}
 
-		best, bestMs, err := bestValidLap(c.Context(), deps, uid, carIdx)
-		if err != nil {
-			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
-				"error": err.Error(),
-			})
+		// Resolve baseline lap. Default = best valid lap in the (possibly
+		// overridden) reference session. Explicit ?reference_lap=N picks a
+		// specific lap so the caller can stack arbitrary historical laps.
+		var (
+			best   int
+			bestMs int
+		)
+		if refLapStr := strings.TrimSpace(c.Query("reference_lap")); refLapStr != "" {
+			n, perr := strconv.Atoi(refLapStr)
+			if perr != nil || n <= 0 {
+				return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+					"error": "reference_lap must be a positive integer",
+				})
+			}
+			best = n
+			bestMs, _ = lapTimeFromHistory(c.Context(), deps, refUID, refCar, best)
+		} else {
+			best, bestMs, err = bestValidLap(c.Context(), deps, refUID, refCar)
+			if err != nil {
+				return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+					"error": err.Error(),
+				})
+			}
 		}
 		if best == 0 {
 			return c.Status(fiber.StatusNotFound).JSON(fiber.Map{
@@ -390,14 +446,16 @@ func lapCompareHandler(deps *Deps) fiber.Handler {
 		windowAfter := parseFloatDefault(c.Query("window_after_m"), 50)
 
 		// Pre-fetch hifreq samples for both laps. One query each — small
-		// volume (≈10Hz × 90s × 1 channel ≈ 900 rows worst case).
+		// volume (≈10Hz × 90s × 1 channel ≈ 900 rows worst case). The
+		// baseline lap may live in a different session when the caller set
+		// reference_session_uid, so honour that here.
 		yourSamples, err := loadLapSamples(c.Context(), deps, uid, your)
 		if err != nil {
 			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
 				"error": err.Error(),
 			})
 		}
-		bestSamples, err := loadLapSamples(c.Context(), deps, uid, best)
+		bestSamples, err := loadLapSamples(c.Context(), deps, refUID, best)
 		if err != nil {
 			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
 				"error": err.Error(),
@@ -455,6 +513,9 @@ func lapCompareHandler(deps *Deps) fiber.Handler {
 			WindowBeforeM: windowBefore,
 			WindowAfterM:  windowAfter,
 			Corners:       out,
+		}
+		if refUID != uid {
+			resp.BestLapSessionUID = uidString(refUID)
 		}
 		if len(corners) == 0 {
 			resp.Note = "no curated corners for this track id — supply ?corner= or curate workspace/tracks/<id>.json"
@@ -932,3 +993,128 @@ func floatPtr(v float64) *float64 { return &v }
 // _ silences unused-import warnings if storage symbols are accidentally
 // trimmed during refactors; the import is load-bearing for compilation.
 var _ = storage.TelemetryHifreqRow{}
+
+// ---------------------------------------------------------------------------
+// /api/laps/drs_usage — per-lap DRS utilization metrics
+// ---------------------------------------------------------------------------
+
+// DRSUsagePerLap is the response for /api/laps/drs_usage. Two callers:
+//   - Live agent's get_drs_usage tool (when driver asks about DRS timing)
+//   - pi-agent setup specialist (decides whether to push "open DRS earlier")
+// available_s = total seconds DRS was permitted on this lap (in zone or post-
+// activation point); active_s = total seconds DRS flap was actually open.
+// utilization_pct = active_s / available_s × 100. first_open_distance_m is
+// where the driver first opened the flap on the lap.
+type DRSUsagePerLap struct {
+	Lap                  int     `json:"lap"`
+	LapTimeMs            int     `json:"lap_time_ms,omitempty"`
+	LapLabel             string  `json:"lap_label,omitempty"`
+	SamplesTotal         int     `json:"samples_total"`
+	AllowedSamples       int     `json:"allowed_samples"`
+	ActiveSamples        int     `json:"active_samples"`
+	AvailableSec         float64 `json:"available_s"`
+	ActiveSec            float64 `json:"active_s"`
+	UtilizationPct       float64 `json:"utilization_pct"`
+	FirstOpenDistanceM   float64 `json:"first_open_distance_m"`
+	FirstAllowedDistanceM float64 `json:"first_allowed_distance_m"`
+	OpenDelaySec         float64 `json:"open_delay_s"` // first_open - first_allowed (proxy for "late open")
+}
+
+// DRSUsageResponse is the wrapper for one or more laps' DRS analytics.
+type DRSUsageResponse struct {
+	SessionUID string           `json:"session_uid"`
+	TrackID    int              `json:"track_id"`
+	Laps       []DRSUsagePerLap `json:"laps"`
+	Note       string           `json:"note,omitempty"`
+}
+
+// drsUsageSQL aggregates per-lap DRS metrics from telemetry_hifreq. The
+// telemetry_hifreq stores `drs_allowed` (sourced from RaceState which mirrors
+// CarStatus.DRSAllowed) and `drs` (raw CarTelemetry.DRS flag). We approximate
+// per-lap seconds as (samples × lap_span / total_samples) which is robust to
+// variable sampling cadence.
+const drsUsageSQL = `
+SELECT
+  lap,
+  COUNT(*)                                                       AS samples_total,
+  SUM(CASE WHEN drs_allowed > 0 THEN 1 ELSE 0 END)               AS allowed_samples,
+  SUM(CASE WHEN drs > 0 THEN 1 ELSE 0 END)                       AS active_samples,
+  CAST(MAX(current_lap_time_ms) - MIN(current_lap_time_ms) AS BIGINT) AS lap_span_ms,
+  MIN(CASE WHEN drs > 0 THEN track_position END)                 AS first_open_m,
+  MIN(CASE WHEN drs_allowed > 0 THEN track_position END)         AS first_allowed_m
+FROM telemetry_hifreq
+WHERE session_uid = %s AND lap = %d
+GROUP BY lap
+`
+
+func drsUsageHandler(deps *Deps) fiber.Handler {
+	return func(c *fiber.Ctx) error {
+		ctx := newLapCtx(c, deps)
+		state, err := ctx.resolve()
+		if err != nil {
+			return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": err.Error()})
+		}
+		uid := state.sessionUID
+		carIdx := state.playerCarIndex
+
+		lapsParam := strings.TrimSpace(c.Query("lap", c.Query("laps", "last")))
+		if lapsParam == "" {
+			lapsParam = "last"
+		}
+		resolved, err := resolveLaps(c.Context(), deps, uid, carIdx, lapsParam)
+		if err != nil {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
+		}
+
+		out := DRSUsageResponse{
+			SessionUID: uidString(uid),
+			TrackID:    state.trackID,
+			Laps:       make([]DRSUsagePerLap, 0, len(resolved)),
+		}
+		for _, r := range resolved {
+			sql := fmt.Sprintf(drsUsageSQL, uidString(r.sessionUID), r.lap)
+			rows, err := deps.Store.Query(c.Context(), sql)
+			if err != nil {
+				return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
+			}
+			entry := DRSUsagePerLap{
+				Lap:       r.lap,
+				LapTimeMs: r.lapTimeMs,
+				LapLabel:  r.label,
+			}
+			if len(rows) > 0 {
+				row := rows[0]
+				entry.SamplesTotal = toInt(row["samples_total"])
+				entry.AllowedSamples = toInt(row["allowed_samples"])
+				entry.ActiveSamples = toInt(row["active_samples"])
+				lapSpanMs := toFloat(row["lap_span_ms"])
+				if entry.SamplesTotal > 0 && lapSpanMs > 0 {
+					perSample := lapSpanMs / float64(entry.SamplesTotal) / 1000.0
+					entry.AvailableSec = round2(perSample * float64(entry.AllowedSamples))
+					entry.ActiveSec = round2(perSample * float64(entry.ActiveSamples))
+				}
+				if entry.AvailableSec > 0 {
+					entry.UtilizationPct = round1(entry.ActiveSec / entry.AvailableSec * 100.0)
+				}
+				if row["first_open_m"] != nil {
+					entry.FirstOpenDistanceM = round1(toFloat(row["first_open_m"]))
+				}
+				if row["first_allowed_m"] != nil {
+					entry.FirstAllowedDistanceM = round1(toFloat(row["first_allowed_m"]))
+				}
+				if entry.FirstOpenDistanceM > 0 && entry.FirstAllowedDistanceM > 0 {
+					// Approximate "open delay" via distance / speed estimate
+					// is fragile; report the raw distance gap so the caller
+					// can reason about it. Seconds-equivalent skipped to
+					// avoid claiming precision we don't have.
+					entry.OpenDelaySec = round2((entry.FirstOpenDistanceM - entry.FirstAllowedDistanceM) / 60.0)
+				}
+			}
+			out.Laps = append(out.Laps, entry)
+		}
+		if len(out.Laps) == 0 {
+			out.Note = "no completed laps with telemetry_hifreq coverage yet"
+		}
+		return c.JSON(out)
+	}
+}

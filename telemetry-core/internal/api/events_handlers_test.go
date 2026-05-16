@@ -214,14 +214,17 @@ func TestEventAck_DeliveredRemovesAndRecords(t *testing.T) {
 	deps := makeEventDeps(10)
 	app := newEventApp(t, deps)
 
+	// Use lap_summary (RequiresAck=false by default) so AckDelivered
+	// drains the queue. The awaiting-ack path is covered in the brain's
+	// ack-lifecycle tests + TestEventAck_RequiresAckHoldsAwaiting below.
 	body, _ := json.Marshal(map[string]any{
-		"type":     "box_now",
-		"priority": 5,
-		"summary":  "Box this lap",
+		"type":     "lap_summary",
+		"priority": 2,
+		"summary":  "Lap 5: clean.",
 	})
 	doReq(t, app, "POST", "/api/events/interrupt", body)
 
-	_, leaseOut := doReq(t, app, "GET", "/api/events/next?min_priority=4", nil)
+	_, leaseOut := doReq(t, app, "GET", "/api/events/next?min_priority=1", nil)
 	var leased map[string]any
 	_ = json.Unmarshal(leaseOut, &leased)
 	id, _ := leased["id"].(string)

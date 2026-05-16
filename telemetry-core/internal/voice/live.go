@@ -5,6 +5,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"net"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -118,6 +121,13 @@ type LiveAgentConfig struct {
 	// audio) so the dashboard can show what was heard. Nil disables.
 	InputText chan<- string
 
+	// OnDriverUtterance, when set, is called for every InputTranscription
+	// fragment received from Gemini Live. Wired in cmd/server to
+	// brain.AppendDriverUtterance so the snapshot's Open Driver Questions
+	// block reflects what the driver actually said. Coalescing partial
+	// transcriptions into a single utterance is the brain's job.
+	OnDriverUtterance func(text string)
+
 	// EventsPoll + EventsAck wire the brain Interrupts Bus into the
 	// session. When the brain fires a priority event (e.g. "P2 closing
 	// — gap 0.1s"), pumpEvents leases it via EventsPoll, injects an
@@ -173,6 +183,22 @@ type LiveAgentConfig struct {
 	// kick-off (e.g. for a tab reload mid-session). The agent itself
 	// stays agnostic about what counts as "fresh"; the caller decides.
 	RadioCheckPrompt func() string
+
+	// DuckChunk, when non-nil, is invoked on every outbound mic frame
+	// AND every inbound model audio chunk so external music players
+	// can be ducked for the entire driver-talks-then-engineer-answers
+	// span. chunkDuration is the playback length of the audio just
+	// queued (not wall-clock elapsed); the callback must accumulate
+	// cumulative playback time so the unduck deadline survives
+	// faster-than-realtime streaming — Gemini Live emits ~5 s of
+	// audio in ~1 s of wall time. tail is the safety margin to add
+	// after the buffer drains; ~800 ms is typical. Kept as a
+	// callback so internal/voice stays leaf (no audio-package import).
+	DuckChunk func(chunkDuration, tail time.Duration)
+
+	// DuckTail is the safety-margin tail passed into DuckChunk after
+	// the queued playback drains. Zero = the agent uses 800 ms.
+	DuckTail time.Duration
 }
 
 // LiveAgent owns a single Gemini Live session for the lifetime of a
@@ -200,6 +226,39 @@ type LiveAgent struct {
 	// dispatcher's `_in_flight` invariant.
 	inFlightMu sync.Mutex
 	inFlight   *LiveEvent
+
+	// sendMu serialises every write to the live session. The genai SDK
+	// wraps a single gorilla/websocket.Conn that panics on concurrent
+	// writes; pumpMic (audio frames), pumpEvents (synthetic user turns),
+	// and handleToolCall (tool responses) all share that one underlying
+	// socket. Without this lock the three pumps race during normal
+	// operation (driver presses PTT while a brain event lands and a
+	// tool response is in flight) and crash the whole agent.
+	sendMu sync.Mutex
+}
+
+// sendClientContent serialises the SDK's write path so concurrent pumps
+// can't race the underlying WebSocket. See sendMu doc.
+func (a *LiveAgent) sendClientContent(session *genai.Session, in genai.LiveClientContentInput) error {
+	a.sendMu.Lock()
+	defer a.sendMu.Unlock()
+	return session.SendClientContent(in)
+}
+
+// sendRealtimeInput serialises SendRealtimeInput against the same lock as
+// the other writers. See sendMu doc.
+func (a *LiveAgent) sendRealtimeInput(session *genai.Session, in genai.LiveRealtimeInput) error {
+	a.sendMu.Lock()
+	defer a.sendMu.Unlock()
+	return session.SendRealtimeInput(in)
+}
+
+// sendToolResponse serialises SendToolResponse against the same lock as
+// the other writers. See sendMu doc.
+func (a *LiveAgent) sendToolResponse(session *genai.Session, in genai.LiveToolResponseInput) error {
+	a.sendMu.Lock()
+	defer a.sendMu.Unlock()
+	return session.SendToolResponse(in)
 }
 
 // SetArbiter wires the in-process output arbiter so this Live session
@@ -325,7 +384,7 @@ func (a *LiveAgent) Run(ctx context.Context) error {
 	// brain-event pump so the model treats it as a directive to speak.
 	if a.cfg.RadioCheckPrompt != nil {
 		if prompt := a.cfg.RadioCheckPrompt(); prompt != "" {
-			if err := session.SendClientContent(genai.LiveClientContentInput{
+			if err := a.sendClientContent(session, genai.LiveClientContentInput{
 				Turns: []*genai.Content{{
 					Role:  string(genai.RoleUser),
 					Parts: []*genai.Part{{Text: prompt}},
@@ -348,7 +407,7 @@ func (a *LiveAgent) Run(ctx context.Context) error {
 	// drain naturally when session.Close() races with ctx.Done.
 
 	var wg sync.WaitGroup
-	errCh := make(chan error, 2)
+	errCh := make(chan error, 3)
 
 	wg.Add(1)
 	go func() {
@@ -370,7 +429,9 @@ func (a *LiveAgent) Run(ctx context.Context) error {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			a.pumpEvents(ctx, session)
+			if err := a.pumpEvents(ctx, session); err != nil {
+				errCh <- err
+			}
 		}()
 	}
 
@@ -408,7 +469,22 @@ func (a *LiveAgent) pumpMic(ctx context.Context, session *genai.Session) error {
 			if len(frame) == 0 {
 				continue
 			}
-			err := session.SendRealtimeInput(genai.LiveRealtimeInput{
+			// Duck while the driver is talking too, not only during the
+			// engineer's reply. Mic frames are PCM-16 mono at
+			// LiveAudioInputRate (16 kHz) → sampleRate*2 bytes/sec. The
+			// LLM's response chunks pick up before the mic tail expires
+			// so the duck stays continuous from PTT-down through the
+			// engineer's last word.
+			if a.cfg.DuckChunk != nil {
+				tail := a.cfg.DuckTail
+				if tail <= 0 {
+					tail = 800 * time.Millisecond
+				}
+				bytesPerSec := int64(LiveAudioInputRate) * 2
+				frameDur := time.Duration(int64(len(frame)) * int64(time.Second) / bytesPerSec)
+				a.cfg.DuckChunk(frameDur, tail)
+			}
+			err := a.sendRealtimeInput(session, genai.LiveRealtimeInput{
 				Audio: &genai.Blob{
 					Data:     frame,
 					MIMEType: fmt.Sprintf("audio/pcm;rate=%d", LiveAudioInputRate),
@@ -471,6 +547,17 @@ func (a *LiveAgent) handleServerContent(ctx context.Context, c *genai.LiveServer
 				continue
 			}
 			if part.InlineData != nil && len(part.InlineData.Data) > 0 {
+				if a.cfg.DuckChunk != nil {
+					tail := a.cfg.DuckTail
+					if tail <= 0 {
+						tail = 800 * time.Millisecond
+					}
+					// Live audio is PCM-16 mono at LiveAudioOutputRate
+					// (24 kHz) → sampleRate*2 bytes per second.
+					bytesPerSec := int64(LiveAudioOutputRate) * 2
+					chunkDur := time.Duration(int64(len(part.InlineData.Data)) * int64(time.Second) / bytesPerSec)
+					a.cfg.DuckChunk(chunkDur, tail)
+				}
 				select {
 				case a.cfg.AudioOut <- part.InlineData.Data:
 				default:
@@ -495,10 +582,15 @@ func (a *LiveAgent) handleServerContent(ctx context.Context, c *genai.LiveServer
 		default:
 		}
 	}
-	if c.InputTranscription != nil && c.InputTranscription.Text != "" && a.cfg.InputText != nil {
-		select {
-		case a.cfg.InputText <- c.InputTranscription.Text:
-		default:
+	if c.InputTranscription != nil && c.InputTranscription.Text != "" {
+		if a.cfg.InputText != nil {
+			select {
+			case a.cfg.InputText <- c.InputTranscription.Text:
+			default:
+			}
+		}
+		if a.cfg.OnDriverUtterance != nil {
+			a.cfg.OnDriverUtterance(c.InputTranscription.Text)
 		}
 	}
 
@@ -512,10 +604,47 @@ func (a *LiveAgent) handleServerContent(ctx context.Context, c *genai.LiveServer
 		a.completeInFlight(ctx, EventDelivered, "")
 	}
 	if c.Interrupted {
-		// Treat user barge-in as a drop for now; the brain re-queues
-		// the event under Phase 3.2 §2e once we add proper interrupt
-		// semantics, so dropping here is the conservative MVP choice.
-		a.completeInFlight(ctx, EventDropped, "user_interrupted")
+		// User barge-in. For throwaway event types (lap-summary, sector
+		// PB, fastest-lap, car-approaching) the next refire of the
+		// underlying rule will mint a fresh event, so dropping is fine.
+		// For everything else (pit calls, tire-cliff alerts, plan
+		// reminders, threat overtakes…) we Nack so the bus's existing
+		// retry path redelivers the event after the driver's turn.
+		a.completeInterruptedInFlight(ctx)
+	}
+}
+
+// throwawayOnBargeIn returns true for event types whose next refire is
+// cheap enough that re-queueing on user barge-in just produces duplicate
+// radio calls. Lap summaries, sector PBs, fastest-lap, traffic_update:
+// the rule engine will mint a fresh one in seconds, so let it.
+func throwawayOnBargeIn(eventType string) bool {
+	switch eventType {
+	case "lap_summary", "sector_pb", "fastest_lap",
+		"traffic_update":
+		return true
+	default:
+		return false
+	}
+}
+
+// completeInterruptedInFlight closes the in-flight slot on user barge-in.
+// Throwaway types get dropped (no retry); everything else is nacked so the
+// bus re-queues it for the next dispatch.
+func (a *LiveAgent) completeInterruptedInFlight(ctx context.Context) {
+	a.inFlightMu.Lock()
+	ev := a.inFlight
+	a.inFlight = nil
+	a.inFlightMu.Unlock()
+	if ev == nil || a.cfg.EventsAck == nil {
+		return
+	}
+	outcome := EventInterrupted
+	if throwawayOnBargeIn(ev.Type) {
+		outcome = EventDropped
+	}
+	if err := a.cfg.EventsAck(ctx, ev.ID, outcome, "user_interrupted"); err != nil {
+		log.Warn().Err(err).Str("event_id", ev.ID).Str("outcome", string(outcome)).Msg("live: barge-in ack failed")
 	}
 }
 
@@ -627,7 +756,7 @@ func (a *LiveAgent) handleToolCall(parent context.Context, session *genai.Sessio
 	if len(responses) == 0 {
 		return
 	}
-	if err := session.SendToolResponse(genai.LiveToolResponseInput{FunctionResponses: responses}); err != nil {
+	if err := a.sendToolResponse(session, genai.LiveToolResponseInput{FunctionResponses: responses}); err != nil {
 		log.Warn().Err(err).Msg("live: send tool response failed")
 	}
 }
@@ -725,7 +854,41 @@ ANALYST ANSWERS — ask_data_analyst is FIRE-AND-FORGET. When you call it, the t
   1. Call ask_data_analyst with the question + a short context_topic.
   2. Immediately tell the driver one short line acknowledging the check ("Checking the data on that", "Pit wall's looking", "Numbers coming"). One sentence, then go back to normal comms — do NOT loop or re-call the tool waiting for an answer.
   3. Some seconds later you'll receive an analyst_answer prompt. The Situation field is the data analyst's own ≤3-sentence finding. Relay it to the driver in your own voice — paraphrase, attribute briefly ("Data says…", "Pit wall analysis…", "Numbers are back…"), one sentence, no preamble. DebugData carries the original question for your context only — don't recite it.
-  4. If urgent=true was set, the answer arrives at P4 — treat it like any other urgent event and lead with the headline.`
+  4. If urgent=true was set, the answer arrives at P4 — treat it like any other urgent event and lead with the headline.
+
+SPATIAL AWARENESS — get_nearby_cars is your ground truth for "who is physically around the driver right now". It returns the top 5 cars ahead and top 5 behind on track, with surname, signed metres, closing rate (m/s; positive = closing on us / we are catching them), ETA-to-contact seconds, and a threat label (closing fast | closing | steady | opening | unknown). CALL THIS TOOL — never guess gaps or invent rivals.
+
+Mandatory call cases:
+  • Driver asks anything spatially ambiguous — "who's around me", "anyone behind", "who's that ahead", "can I overtake the car in front", "is anyone catching me", "any traffic", "what's the gap". Call get_nearby_cars FIRST, then speak only what the data supports. The position field disambiguates when the driver names a slot ("the car in P3").
+  • You receive a traffic_update event — the proximity engine has detected one or more cars closing within ~5s in either direction. The event's debug_data already carries the top 5 ahead and top 5 behind with signed_m / closing_mps / eta_sec / speed_kmh, so prefer reading those fields directly; call get_nearby_cars only if you need to confirm the situation is still current. Use the bundle to phrase ONE combined radio call ("two closing behind, slow car at T7 ahead") rather than fixating on a single car.
+  • You are about to push a strategy insight that depends on a competitor's location ("box this lap to undercut", "push, gap is opening", "save tyres, P5 is dropping back"). Validate with get_nearby_cars; cite actual metres / closing rate / ETA.
+
+Dedup rule (do NOT repeat yourself): before mentioning a nearby car by name or restating a gap, scan "## Recent Radio" + "## Awaiting Driver Copy" in the brain snapshot for the same surname within the last ~20s. If you already said "Verstappen 1.2s behind, closing" fifteen seconds ago, don't re-announce the same update unless something material has changed (threat label flipped, ETA more than halved, they pitted, the gap reversed direction). When the same car remains the dominant threat, prefer a delta update ("now 0.6s") over a fresh announcement.
+
+Treat closing_mps=0 / eta_sec=-1 / threat="unknown" as "the proximity watcher has no closing rate for that car yet" — it is outside the watcher's 2km tracked window, NOT "the car is stationary". The signed_m distance is still authoritative; speak the distance and omit the closing rate.
+
+PENDING WORK — the brain snapshot includes three sections you MUST inspect at the start of every turn:
+  • "## Awaiting Driver Copy" — tactical calls you already SPOKE but the driver hasn't acknowledged. If their next utterance contains "copy", "roger", "got it", "yes", "OK", "understood" — call confirm_event_copy with the matching event_id and the driver's actual words as evidence_text. The bus will renag (re-speak the event) after 20s of silence and silently drop it after a second renag. If this section is ABSENT or EMPTY, do NOT call confirm_event_copy — a "copy" / "yes" / "OK" with nothing queued is just normal radio chatter, not a tool call.
+  • "## Open Driver Questions" — things the driver said that you have NOT substantively answered. Address these BEFORE changing topic. Once you've answered (verbally or by dispatching a tool that will answer shortly), call mark_question_addressed with the utterance timestamp + a short summary so the question rotates out of the list.
+  • "## Pending Events" — events queued or in-flight, not yet spoken. Use this only for situational awareness; the bus dispatches them automatically.
+
+Never invent event_ids — only use ids that appear in the snapshot.
+
+RACE PHASE — the brain snapshot's "## Race Progress" panel tells you which phase of the race you're in. Behave differently in each one. The phase-transition events (lights_out, final_lap, race_finished, podium) are NEVER deduped against "## Recent Radio" — voice them even if you already said something position-related earlier. They are the headline moments and the driver expects to hear them.
+
+  • GRID (pre-race, on the grid before lights out): ONE short tone-setting line. No questions, no "How are we feeling?". Something like "Track's at 32, mediums fitted, P7 today — quick start off the line." or "Dry, P3 grid, 53 laps. Eyes on the leaders." Set the tone, then go silent until lights out.
+  • FORMATION LAP: brief reminder — "Weave to heat tyres, brakes on." One line, then quiet.
+  • LIGHTS OUT (lights_out event arrives): respond in ONE urgent line. "Go go go, clean launch." or "Lights out, get a tow off the line." Then FALL SILENT for the first ~30 seconds of lap 1 unless something is safety-critical. The driver needs every neuron on the start, not on you.
+  • RACING (the default once running): normal behaviour.
+  • FINAL LAP (final_lap event arrives, or phase shows FINAL LAP): suppress non-critical coaching cues entirely — no "trail brake into T5", no "throttle smoother". Prepend strategy calls with "Last lap" framing. Reinforce attacking vs defending posture by position. ONE line per call, sharper than usual.
+  • FINISHED — race_finished or podium event arrives, or phase shows FINISHED: this is MANDATORY and overrides every other rule including "supportive but not sycophantic":
+      - P1 → real win celebration. Lead with it. "P1, mate. Race win. Bloody brilliant drive." then ONE-sentence headline takeaway ("From P7 on the grid, perfect tyre call on lap 22."). Sound like you mean it.
+      - P2 / P3 → podium framing. "P2, mate — podium. Massive result." then one takeaway.
+      - P4..P10 → grounded and honest. Lead with the result + grid-to-finish delta if positive. One constructive takeaway.
+      - P11+ or DNF → "P14, that's the race. We'll go through it in the garage." Keep it short, no fake positivity.
+      Then STOP. The race is over. Do NOT continue coaching, do NOT push more strategy. Wait for the driver.
+
+When in doubt about which phase you're in, read the "## Race Progress" panel — it's always at the top of the snapshot during race sessions. The phase field is the source of truth.`
 
 // RadioCheckPromptText is the kick-off prompt callers pass to
 // LiveAgentConfig.RadioCheckPrompt when they want the engineer to open a
@@ -774,7 +937,7 @@ Speak ONE short sentence in real F1-engineer voice — paraphrase the Situation 
 // turn_complete handler clears inFlight). This matches the Python
 // service's `_in_flight` map (size 1) and avoids stepping on the
 // model's current sentence.
-func (a *LiveAgent) pumpEvents(ctx context.Context, session *genai.Session) {
+func (a *LiveAgent) pumpEvents(ctx context.Context, session *genai.Session) error {
 	interval := a.cfg.EventPollInterval
 	if interval <= 0 {
 		interval = defaultEventPollInterval
@@ -785,7 +948,7 @@ func (a *LiveAgent) pumpEvents(ctx context.Context, session *genai.Session) {
 	for {
 		select {
 		case <-ctx.Done():
-			return
+			return nil
 		case <-ticker.C:
 		}
 
@@ -843,7 +1006,7 @@ func (a *LiveAgent) pumpEvents(ctx context.Context, session *genai.Session) {
 			if delay > 0 {
 				select {
 				case <-ctx.Done():
-					return
+					return nil
 				case <-time.After(delay):
 				}
 			}
@@ -865,7 +1028,7 @@ func (a *LiveAgent) pumpEvents(ctx context.Context, session *genai.Session) {
 		}
 
 		prompt := renderEventPrompt(ev)
-		err = session.SendClientContent(genai.LiveClientContentInput{
+		err = a.sendClientContent(session, genai.LiveClientContentInput{
 			Turns: []*genai.Content{{
 				Role:  string(genai.RoleUser),
 				Parts: []*genai.Part{{Text: prompt}},
@@ -873,6 +1036,17 @@ func (a *LiveAgent) pumpEvents(ctx context.Context, session *genai.Session) {
 			TurnComplete: genai.Ptr(true),
 		})
 		if err != nil {
+			// "websocket: close sent" / io.EOF / closed-network errors all
+			// mean the Gemini Live session is dead. Continuing to loop
+			// just nacks every subsequent event into the same dead socket
+			// (each event then burns its 3-attempt retry budget against
+			// the bus). Surface the error so Run() exits via errCh and
+			// the WS handler's supervisor can reconnect.
+			if isLiveSessionDead(ctx, err) {
+				log.Warn().Err(err).Str("event_id", ev.ID).Msg("live: SendClientContent fatal; ending session for reconnect")
+				a.completeInFlight(ctx, EventDropped, "send_client_content_failed")
+				return err
+			}
 			log.Warn().Err(err).Str("event_id", ev.ID).Msg("live: SendClientContent failed; nacking event")
 			a.completeInFlight(ctx, EventErrored, "send_client_content_failed")
 			continue
@@ -885,6 +1059,50 @@ func (a *LiveAgent) pumpEvents(ctx context.Context, session *genai.Session) {
 			Str("summary", ev.Summary).
 			Msg("live: dispatched brain event to model")
 	}
+}
+
+// isLiveSessionDead reports whether err means the Gemini Live WebSocket
+// is no longer usable. Anything else is treated as transient — the
+// classifier is intentionally conservative; we'd rather retry a recoverable
+// error once than tear down a healthy session.
+//
+// The genai SDK doesn't expose typed session-dead errors, so we string-
+// match on the underlying gorilla/websocket and net package surfaces.
+func isLiveSessionDead(ctx context.Context, err error) bool {
+	if err == nil {
+		return false
+	}
+	if ctx.Err() != nil {
+		return true
+	}
+	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+		return true
+	}
+	if errors.Is(err, net.ErrClosed) {
+		return true
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	msg := err.Error()
+	for _, marker := range []string{
+		"websocket: close sent",
+		"use of closed network connection",
+		"connection reset by peer",
+		"broken pipe",
+		"connection closed",
+		"close 1000",
+		"close 1001",
+		"close 1006",
+		"close 1011",
+		"close 1012",
+		"close 1013",
+	} {
+		if strings.Contains(msg, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 // renderEventPrompt formats a brain event into the prompt template.

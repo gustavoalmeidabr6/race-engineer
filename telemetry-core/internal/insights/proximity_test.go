@@ -21,9 +21,11 @@ func newProxWatcherFor(state *models.RaceState) (*ProximityWatcher, *brain.RaceB
 }
 
 // seedHistory pre-populates per-car samples on the watcher so we can test
-// firing logic without waiting real wall-clock seconds.
-func seedHistory(w *ProximityWatcher, carIdx uint8, samples []proxSample, armed bool) {
-	w.cars[carIdx] = &proxCarHistory{samples: samples, lastSeen: samples[len(samples)-1].at, armed: armed}
+// firing logic without waiting real wall-clock seconds. Each sample's
+// totalM is derived from signedM relative to a synthetic player baseline
+// — only the *delta* matters for closing-rate / speed math.
+func seedHistory(w *ProximityWatcher, carIdx uint8, samples []proxSample) {
+	w.cars[carIdx] = &proxCarHistory{samples: samples, lastSeen: samples[len(samples)-1].at}
 }
 
 // TestNearestBehindOnTrack — basic geometry: pick the car whose lap
@@ -63,8 +65,8 @@ func TestNearestBehindOnTrack_Wrap(t *testing.T) {
 	}
 }
 
-// TestProximityWatcher_FiresOnLowTTI — car closing fast behind, TTI < 8s,
-// fires P2.
+// TestProximityWatcher_FiresOnLowTTI — car closing fast behind, TTI under
+// the unified 5s threshold, fires a single EventTrafficUpdate.
 func TestProximityWatcher_FiresOnLowTTI(t *testing.T) {
 	st := &models.RaceState{
 		TrackLength:    5891,
@@ -77,19 +79,17 @@ func TestProximityWatcher_FiresOnLowTTI(t *testing.T) {
 		PitStatus:      0,
 	}
 	st.GridPositions[19] = models.GridPosition{CarIndex: 19, LapDistance: 1000, ResultStatus: 2, DriverStatus: 4}
-	// Place car 3 at 200m behind (signed = -200) — at 30 m/s closure → 6.7s TTI.
-	st.GridPositions[3] = models.GridPosition{CarIndex: 3, LapDistance: 800, ResultStatus: 2, DriverStatus: 4}
+	st.GridPositions[3] = models.GridPosition{CarIndex: 3, LapDistance: 850, ResultStatus: 2, DriverStatus: 4}
 
 	w, bus := newProxWatcherFor(st)
 	now := time.Now()
-	// 4 prior samples showing the car closing from 320m → 200m over 4s.
-	// closure = (320 - 200) / 4s = 30 m/s. TTI = 200 / 30 = 6.7s < 8s → fire.
+	// Closing 50m/s from 350m → 150m over 4s. TTI = 150 / 50 = 3.0s < 5s.
 	seedHistory(w, 3, []proxSample{
-		{at: now.Add(-4 * time.Second), signedM: -320},
-		{at: now.Add(-3 * time.Second), signedM: -290},
-		{at: now.Add(-2 * time.Second), signedM: -260},
-		{at: now.Add(-1 * time.Second), signedM: -230},
-	}, true) // pre-armed
+		{at: now.Add(-4 * time.Second), signedM: -350, totalM: 0},
+		{at: now.Add(-3 * time.Second), signedM: -300, totalM: 50},
+		{at: now.Add(-2 * time.Second), signedM: -250, totalM: 100},
+		{at: now.Add(-1 * time.Second), signedM: -200, totalM: 150},
+	})
 
 	w.tick()
 
@@ -98,19 +98,26 @@ func TestProximityWatcher_FiresOnLowTTI(t *testing.T) {
 		t.Fatalf("expected 1 event, got %d", len(events))
 	}
 	ev := events[0]
-	if ev.Type != brain.EventCarApproaching {
-		t.Errorf("expected EventCarApproaching, got %s", ev.Type)
+	if ev.Type != brain.EventTrafficUpdate {
+		t.Errorf("expected EventTrafficUpdate, got %s", ev.Type)
 	}
 	if ev.Priority != 2 {
 		t.Errorf("expected P2, got %d", ev.Priority)
 	}
-	if !strings.Contains(ev.Summary, "to contact") {
-		t.Errorf("summary should mention contact ETA, got %q", ev.Summary)
+	if ev.DedupSubject != "traffic" {
+		t.Errorf("expected DedupSubject=traffic, got %q", ev.DedupSubject)
+	}
+	if got, _ := ev.DebugData["behind_count"].(int); got != 1 {
+		t.Errorf("expected behind_count=1, got %d", got)
+	}
+	cars, _ := ev.DebugData["behind_cars"].([]map[string]any)
+	if len(cars) != 1 || cars[0]["car_index"].(int) != 3 {
+		t.Errorf("expected behind_cars=[3], got %+v", cars)
 	}
 }
 
-// TestProximityWatcher_NoFireWhenTTIHigh — car closing slowly enough
-// that TTI stays above the 8s threshold.
+// TestProximityWatcher_NoFireWhenTTIHigh — car closing too slowly to hit
+// the 5s threshold; nothing fires.
 func TestProximityWatcher_NoFireWhenTTIHigh(t *testing.T) {
 	st := &models.RaceState{
 		TrackLength:    5891,
@@ -120,20 +127,20 @@ func TestProximityWatcher_NoFireWhenTTIHigh(t *testing.T) {
 		DriverStatus:   4,
 	}
 	st.GridPositions[19] = models.GridPosition{CarIndex: 19, LapDistance: 1000, ResultStatus: 2, DriverStatus: 4}
-	// Car 800m behind, closing at 50m/4s = 12.5 m/s → TTI = 800/12.5 = 64s.
 	st.GridPositions[3] = models.GridPosition{CarIndex: 3, LapDistance: 200, ResultStatus: 2, DriverStatus: 4}
 
 	w, bus := newProxWatcherFor(st)
 	now := time.Now()
+	// Distance shrinking ~13m/s, gap ~800m → TTI ~62s.
 	seedHistory(w, 3, []proxSample{
-		{at: now.Add(-4 * time.Second), signedM: -850},
-		{at: now.Add(-2 * time.Second), signedM: -825},
-		{at: now.Add(-1 * time.Second), signedM: -812},
-	}, true)
+		{at: now.Add(-4 * time.Second), signedM: -850, totalM: 0},
+		{at: now.Add(-2 * time.Second), signedM: -825, totalM: 25},
+		{at: now.Add(-1 * time.Second), signedM: -812, totalM: 38},
+	})
 	w.tick()
 
 	if got := len(bus.PeekEvents()); got != 0 {
-		t.Errorf("expected no event with TTI ≫ 8s, got %d", got)
+		t.Errorf("expected no event with TTI ≫ 5s, got %d", got)
 	}
 }
 
@@ -151,12 +158,11 @@ func TestProximityWatcher_NoFireWhenOpening(t *testing.T) {
 
 	w, bus := newProxWatcherFor(st)
 	now := time.Now()
-	// Distance growing — car opening up.
 	seedHistory(w, 3, []proxSample{
-		{at: now.Add(-3 * time.Second), signedM: -100},
-		{at: now.Add(-2 * time.Second), signedM: -130},
-		{at: now.Add(-1 * time.Second), signedM: -150},
-	}, true)
+		{at: now.Add(-3 * time.Second), signedM: -100, totalM: 0},
+		{at: now.Add(-2 * time.Second), signedM: -130, totalM: 0},
+		{at: now.Add(-1 * time.Second), signedM: -150, totalM: 0},
+	})
 	w.tick()
 
 	if got := len(bus.PeekEvents()); got != 0 {
@@ -164,15 +170,15 @@ func TestProximityWatcher_NoFireWhenOpening(t *testing.T) {
 	}
 }
 
-// TestProximityWatcher_FiresOnOutLap — prime use case: slow out-lap,
-// hot-lap car behind closing fast.
+// TestProximityWatcher_FiresOnOutLap — slow out-lap, hot-lap car behind
+// closing fast.
 func TestProximityWatcher_FiresOnOutLap(t *testing.T) {
 	st := &models.RaceState{
 		TrackLength:    5891,
 		PlayerCarIndex: 19,
 		Speed:          90,
 		SessionType:    5, // Q1
-		DriverStatus:   3, // Out Lap — was previously silenced
+		DriverStatus:   3, // Out Lap
 		PitStatus:      0,
 	}
 	st.GridPositions[19] = models.GridPosition{CarIndex: 19, LapDistance: 1000, ResultStatus: 2, DriverStatus: 3}
@@ -180,12 +186,12 @@ func TestProximityWatcher_FiresOnOutLap(t *testing.T) {
 
 	w, bus := newProxWatcherFor(st)
 	now := time.Now()
-	// Closing at ~40 m/s — TTI = 150 / 40 = 3.75s
+	// Closing ~40 m/s, 150m → TTI 3.75s < 5s.
 	seedHistory(w, 7, []proxSample{
-		{at: now.Add(-3 * time.Second), signedM: -270},
-		{at: now.Add(-2 * time.Second), signedM: -230},
-		{at: now.Add(-1 * time.Second), signedM: -190},
-	}, true)
+		{at: now.Add(-3 * time.Second), signedM: -270, totalM: 0},
+		{at: now.Add(-2 * time.Second), signedM: -230, totalM: 40},
+		{at: now.Add(-1 * time.Second), signedM: -190, totalM: 80},
+	})
 	w.tick()
 
 	if got := len(bus.PeekEvents()); got != 1 {
@@ -193,14 +199,16 @@ func TestProximityWatcher_FiresOnOutLap(t *testing.T) {
 	}
 }
 
-// TestProximityWatcher_PerCarCooldown — same car shouldn't refire within
-// the cooldown window even if still closing.
-func TestProximityWatcher_PerCarCooldown(t *testing.T) {
+// TestProximityWatcher_WatcherCooldown — once a traffic_update has fired,
+// the watcher must not refire on the very next tick even if the same
+// traffic situation is still active.
+func TestProximityWatcher_WatcherCooldown(t *testing.T) {
 	st := &models.RaceState{
 		TrackLength:    5891,
 		PlayerCarIndex: 19,
 		CurrentLap:     5,
 		Speed:          200,
+		SessionType:    1,
 		DriverStatus:   4,
 	}
 	st.GridPositions[19] = models.GridPosition{CarIndex: 19, LapDistance: 1000, ResultStatus: 2, DriverStatus: 4}
@@ -209,13 +217,13 @@ func TestProximityWatcher_PerCarCooldown(t *testing.T) {
 	w, bus := newProxWatcherFor(st)
 	now := time.Now()
 	seedHistory(w, 3, []proxSample{
-		{at: now.Add(-3 * time.Second), signedM: -270},
-		{at: now.Add(-2 * time.Second), signedM: -230},
-		{at: now.Add(-1 * time.Second), signedM: -190},
-	}, true)
+		{at: now.Add(-3 * time.Second), signedM: -300, totalM: 0},
+		{at: now.Add(-2 * time.Second), signedM: -250, totalM: 50},
+		{at: now.Add(-1 * time.Second), signedM: -200, totalM: 100},
+	})
 	w.tick()
 	first := len(bus.PeekEvents())
-	w.tick() // immediate retick — should be suppressed
+	w.tick() // same situation — must NOT add another event
 	second := len(bus.PeekEvents())
 
 	if first != 1 {
@@ -227,7 +235,7 @@ func TestProximityWatcher_PerCarCooldown(t *testing.T) {
 }
 
 // TestProximityWatcher_SnapshotPublished — Snapshot() returns ahead/behind
-// lists with closing rates.
+// lists with closing rates AND per-car speeds.
 func TestProximityWatcher_SnapshotPublished(t *testing.T) {
 	st := &models.RaceState{
 		TrackLength:    5891,
@@ -237,19 +245,22 @@ func TestProximityWatcher_SnapshotPublished(t *testing.T) {
 		DriverStatus:   4,
 	}
 	st.GridPositions[19] = models.GridPosition{CarIndex: 19, LapDistance: 1000, ResultStatus: 2, DriverStatus: 4}
-	st.GridPositions[3] = models.GridPosition{CarIndex: 3, LapDistance: 850, ResultStatus: 2, DriverStatus: 4}  // 150m behind
-	st.GridPositions[5] = models.GridPosition{CarIndex: 5, LapDistance: 1300, ResultStatus: 2, DriverStatus: 4} // 300m ahead
+	st.GridPositions[3] = models.GridPosition{CarIndex: 3, LapDistance: 850, TotalDistance: 120, ResultStatus: 2, DriverStatus: 4}
+	st.GridPositions[5] = models.GridPosition{CarIndex: 5, LapDistance: 1300, TotalDistance: 60, ResultStatus: 2, DriverStatus: 4}
 	st.GridPositions[7] = models.GridPosition{CarIndex: 7, LapDistance: 4500, ResultStatus: 2, DriverStatus: 4} // out of range
 
 	w, _ := newProxWatcherFor(st)
-	// Two ticks 1s apart so closing rate can compute.
 	now := time.Now()
+	// Behind car covering ~60m in 1s plus 60m more on tick append → ~216 km/h.
 	seedHistory(w, 3, []proxSample{
-		{at: now.Add(-1 * time.Second), signedM: -180},
-	}, false)
+		{at: now.Add(-2 * time.Second), signedM: -240, totalM: 0},
+		{at: now.Add(-1 * time.Second), signedM: -180, totalM: 60},
+	})
+	// Ahead car covering ~30m in 1s.
 	seedHistory(w, 5, []proxSample{
-		{at: now.Add(-1 * time.Second), signedM: 320},
-	}, false)
+		{at: now.Add(-2 * time.Second), signedM: 350, totalM: 0},
+		{at: now.Add(-1 * time.Second), signedM: 320, totalM: 30},
+	})
 	w.tick()
 
 	snap := w.Snapshot()
@@ -257,10 +268,13 @@ func TestProximityWatcher_SnapshotPublished(t *testing.T) {
 		t.Fatal("expected snapshot")
 	}
 	if len(snap.NearbyBehind) != 1 || snap.NearbyBehind[0].CarIndex != 3 {
-		t.Errorf("expected behind=[3], got %+v", snap.NearbyBehind)
+		t.Fatalf("expected behind=[3], got %+v", snap.NearbyBehind)
+	}
+	if snap.NearbyBehind[0].SpeedKmh < 180 || snap.NearbyBehind[0].SpeedKmh > 240 {
+		t.Errorf("expected behind speed_kmh ~216, got %d", snap.NearbyBehind[0].SpeedKmh)
 	}
 	if len(snap.NearbyAhead) != 1 || snap.NearbyAhead[0].CarIndex != 5 {
-		t.Errorf("expected ahead=[5], got %+v", snap.NearbyAhead)
+		t.Fatalf("expected ahead=[5], got %+v", snap.NearbyAhead)
 	}
 	if snap.WatchRadiusM != proximityWatchM {
 		t.Errorf("watch radius unset: %v", snap.WatchRadiusM)
@@ -297,10 +311,10 @@ func TestProximityWatcher_SilentInPitsAndGarage(t *testing.T) {
 			w, bus := newProxWatcherFor(st)
 			now := time.Now()
 			seedHistory(w, 3, []proxSample{
-				{at: now.Add(-3 * time.Second), signedM: -270},
-				{at: now.Add(-2 * time.Second), signedM: -230},
-				{at: now.Add(-1 * time.Second), signedM: -190},
-			}, true)
+				{at: now.Add(-3 * time.Second), signedM: -300, totalM: 0},
+				{at: now.Add(-2 * time.Second), signedM: -250, totalM: 50},
+				{at: now.Add(-1 * time.Second), signedM: -200, totalM: 100},
+			})
 			w.tick()
 
 			got := len(bus.PeekEvents())
@@ -314,141 +328,126 @@ func TestProximityWatcher_SilentInPitsAndGarage(t *testing.T) {
 	}
 }
 
-// TestProximityWatcher_CoalescesMultipleCars — when 2+ cars behind cross
-// the TTI threshold in the same tick, the watcher emits ONE bundled event
-// listing every closer in DebugData (sorted by ETA ascending), not N
-// separate per-car events.
-func TestProximityWatcher_CoalescesMultipleCars(t *testing.T) {
+// TestProximityWatcher_BothDirectionsBundled — when cars are closing
+// from both ahead AND behind in the same tick, ONE traffic_update event
+// fires carrying both populations.
+func TestProximityWatcher_BothDirectionsBundled(t *testing.T) {
 	st := &models.RaceState{
 		TrackLength:    5891,
 		PlayerCarIndex: 19,
-		Position:       1, // P+1 = car at position 2 would be skipped — none of our test cars sit there.
-		CurrentLap:     5,
-		Speed:          200,
-		SessionType:    1, // P1 — non-race so closing_threat.go stays out of it
-		DriverStatus:   4,
-		PitStatus:      0,
-	}
-	st.GridPositions[19] = models.GridPosition{CarIndex: 19, LapDistance: 1000, ResultStatus: 2, DriverStatus: 4, Position: 1}
-	st.GridPositions[3] = models.GridPosition{CarIndex: 3, LapDistance: 850, ResultStatus: 2, DriverStatus: 4, Position: 3}
-	st.GridPositions[7] = models.GridPosition{CarIndex: 7, LapDistance: 800, ResultStatus: 2, DriverStatus: 4, Position: 4}
-	st.GridPositions[11] = models.GridPosition{CarIndex: 11, LapDistance: 700, ResultStatus: 2, DriverStatus: 4, Position: 5}
-
-	w, bus := newProxWatcherFor(st)
-	now := time.Now()
-	// car 3: 150m behind closing 40m/s → TTI 3.75s
-	seedHistory(w, 3, []proxSample{
-		{at: now.Add(-3 * time.Second), signedM: -270},
-		{at: now.Add(-2 * time.Second), signedM: -230},
-		{at: now.Add(-1 * time.Second), signedM: -190},
-	}, true)
-	// car 7: 200m behind closing 30m/s → TTI 6.7s
-	seedHistory(w, 7, []proxSample{
-		{at: now.Add(-3 * time.Second), signedM: -290},
-		{at: now.Add(-2 * time.Second), signedM: -260},
-		{at: now.Add(-1 * time.Second), signedM: -230},
-	}, true)
-	// car 11: 300m behind closing ~50m/s → TTI ~6.0s
-	seedHistory(w, 11, []proxSample{
-		{at: now.Add(-3 * time.Second), signedM: -450},
-		{at: now.Add(-2 * time.Second), signedM: -400},
-		{at: now.Add(-1 * time.Second), signedM: -350},
-	}, true)
-
-	w.tick()
-
-	events := bus.PeekEvents()
-	if len(events) != 1 {
-		t.Fatalf("expected ONE bundled event, got %d", len(events))
-	}
-	ev := events[0]
-	if ev.Type != brain.EventCarApproaching {
-		t.Errorf("expected EventCarApproaching, got %s", ev.Type)
-	}
-	count, _ := ev.DebugData["behind_count"].(int)
-	if count != 3 {
-		t.Errorf("expected behind_count=3 in DebugData, got %d", count)
-	}
-	cars, ok := ev.DebugData["behind_cars"].([]map[string]any)
-	if !ok || len(cars) != 3 {
-		t.Fatalf("expected behind_cars list of 3, got %T len=%d", ev.DebugData["behind_cars"], len(cars))
-	}
-	// Sorted by ETA ascending: 3 (3.75s) < 11 (~6.0s) < 7 (~6.7s).
-	if got := cars[0]["car_index"].(int); got != 3 {
-		t.Errorf("expected lead car_index=3, got %d", got)
-	}
-	if got := cars[2]["car_index"].(int); got != 7 {
-		t.Errorf("expected tail car_index=7, got %d", got)
-	}
-	for _, c := range cars {
-		if _, ok := c["eta_sec"].(float32); !ok {
-			t.Errorf("entry missing eta_sec: %+v", c)
-		}
-		if _, ok := c["distance_m"].(float32); !ok {
-			t.Errorf("entry missing distance_m: %+v", c)
-		}
-	}
-	if !strings.Contains(ev.Summary, "cars closing") {
-		t.Errorf("multi-car summary should mention 'cars closing', got %q", ev.Summary)
-	}
-	if len(ev.Summary) > brain.MaxEventSummaryChars {
-		t.Errorf("summary exceeds %d-char cap: %d (%q)", brain.MaxEventSummaryChars, len(ev.Summary), ev.Summary)
-	}
-	// DebugData must still serialise under the 1KB cap (enforced at enqueue).
-	// If we got here, EnqueueEvent already validated — log for visibility.
-	if ev.DedupSubject == "" {
-		t.Errorf("group event must keep a DedupSubject for cross-rule cooldown")
-	}
-}
-
-// TestProximityWatcher_PartialGroup_CooldownIsolation — cars in cooldown
-// must be EXCLUDED from the bundled event so a stale fire doesn't keep
-// re-mentioning a car the driver was just told about, while a newly-armed
-// car in the same tick still fires on its own.
-func TestProximityWatcher_PartialGroup_CooldownIsolation(t *testing.T) {
-	st := &models.RaceState{
-		TrackLength:    5891,
-		PlayerCarIndex: 19,
-		Position:       1,
+		Position:       4,
 		CurrentLap:     5,
 		Speed:          200,
 		SessionType:    1,
 		DriverStatus:   4,
 		PitStatus:      0,
 	}
-	st.GridPositions[19] = models.GridPosition{CarIndex: 19, LapDistance: 1000, ResultStatus: 2, DriverStatus: 4, Position: 1}
-	st.GridPositions[3] = models.GridPosition{CarIndex: 3, LapDistance: 850, ResultStatus: 2, DriverStatus: 4, Position: 3}
-	st.GridPositions[7] = models.GridPosition{CarIndex: 7, LapDistance: 800, ResultStatus: 2, DriverStatus: 4, Position: 4}
+	st.GridPositions[19] = models.GridPosition{CarIndex: 19, LapDistance: 1000, ResultStatus: 2, DriverStatus: 4, Position: 4}
+	// Two cars behind closing.
+	st.GridPositions[3] = models.GridPosition{CarIndex: 3, LapDistance: 850, ResultStatus: 2, DriverStatus: 4, Position: 6}
+	st.GridPositions[7] = models.GridPosition{CarIndex: 7, LapDistance: 800, ResultStatus: 2, DriverStatus: 4, Position: 7}
+	// One car ahead being caught.
+	st.GridPositions[11] = models.GridPosition{CarIndex: 11, LapDistance: 1150, ResultStatus: 2, DriverStatus: 4, Position: 3}
 
 	w, bus := newProxWatcherFor(st)
 	now := time.Now()
-	// Car 3 has just-fired cooldown (10s ago, refire window is 25s).
+	// Car 3: 150m behind closing 50m/s → TTI 3.0s.
 	seedHistory(w, 3, []proxSample{
-		{at: now.Add(-3 * time.Second), signedM: -270},
-		{at: now.Add(-2 * time.Second), signedM: -230},
-		{at: now.Add(-1 * time.Second), signedM: -190},
-	}, false)
-	w.cars[3].lastFireAt = now.Add(-10 * time.Second)
-	// Car 7 is fresh.
+		{at: now.Add(-3 * time.Second), signedM: -300, totalM: 0},
+		{at: now.Add(-2 * time.Second), signedM: -250, totalM: 50},
+		{at: now.Add(-1 * time.Second), signedM: -200, totalM: 100},
+	})
+	// Car 7: 200m behind closing 40m/s → TTI 5.0s exactly (still inside).
 	seedHistory(w, 7, []proxSample{
-		{at: now.Add(-3 * time.Second), signedM: -290},
-		{at: now.Add(-2 * time.Second), signedM: -260},
-		{at: now.Add(-1 * time.Second), signedM: -230},
-	}, true)
+		{at: now.Add(-3 * time.Second), signedM: -320, totalM: 0},
+		{at: now.Add(-2 * time.Second), signedM: -280, totalM: 40},
+		{at: now.Add(-1 * time.Second), signedM: -240, totalM: 80},
+	})
+	// Car 11: 150m ahead, we are catching at 40m/s → TTI 3.75s.
+	seedHistory(w, 11, []proxSample{
+		{at: now.Add(-3 * time.Second), signedM: 270, totalM: 0},
+		{at: now.Add(-2 * time.Second), signedM: 230, totalM: 40},
+		{at: now.Add(-1 * time.Second), signedM: 190, totalM: 80},
+	})
 
 	w.tick()
 
 	events := bus.PeekEvents()
 	if len(events) != 1 {
-		t.Fatalf("expected 1 event, got %d", len(events))
+		t.Fatalf("expected ONE bundled traffic_update, got %d", len(events))
 	}
 	ev := events[0]
-	count, _ := ev.DebugData["behind_count"].(int)
-	if count != 1 {
-		t.Errorf("expected behind_count=1 (car 3 in cooldown), got %d", count)
+	if ev.Type != brain.EventTrafficUpdate {
+		t.Errorf("expected EventTrafficUpdate, got %s", ev.Type)
 	}
-	if got := ev.DebugData["behind_car_index"].(int); got != 7 {
-		t.Errorf("expected sole car_index=7, got %d", got)
+	bc, _ := ev.DebugData["behind_count"].(int)
+	ac, _ := ev.DebugData["ahead_count"].(int)
+	if bc < 1 {
+		t.Errorf("expected behind_count >= 1 (got %d) — at least car 3 inside 5s TTI", bc)
+	}
+	if ac != 1 {
+		t.Errorf("expected ahead_count=1, got %d", ac)
+	}
+	behindCars, _ := ev.DebugData["behind_cars"].([]map[string]any)
+	aheadCars, _ := ev.DebugData["ahead_cars"].([]map[string]any)
+	if len(behindCars) < 2 {
+		t.Errorf("expected behind_cars to enumerate top-N (>=2), got %d", len(behindCars))
+	}
+	if len(aheadCars) != 1 {
+		t.Errorf("expected ahead_cars=1, got %d", len(aheadCars))
+	}
+	// signed_m must be present + correctly signed.
+	for _, c := range behindCars {
+		sm, ok := c["signed_m"].(float32)
+		if !ok || sm >= 0 {
+			t.Errorf("behind car signed_m should be negative float32: %+v", c)
+		}
+	}
+	for _, c := range aheadCars {
+		sm, ok := c["signed_m"].(float32)
+		if !ok || sm <= 0 {
+			t.Errorf("ahead car signed_m should be positive float32: %+v", c)
+		}
+	}
+	if len(ev.Summary) > brain.MaxEventSummaryChars {
+		t.Errorf("summary exceeds %d-char cap: %d (%q)", brain.MaxEventSummaryChars, len(ev.Summary), ev.Summary)
+	}
+	if ev.DedupSubject != "traffic" {
+		t.Errorf("expected DedupSubject=traffic, got %q", ev.DedupSubject)
+	}
+	if !strings.Contains(ev.DedupKey, "traffic_update:") {
+		t.Errorf("DedupKey should be traffic_update-prefixed, got %q", ev.DedupKey)
+	}
+}
+
+// TestProximityWatcher_SkipsP_Plus1_Behind — closing_threat.go owns the
+// P+1 slot. Even if that car is closing inside the TTI window, the
+// traffic_update rule must skip it. (Other cars still trigger if any.)
+func TestProximityWatcher_SkipsP_Plus1_Behind(t *testing.T) {
+	st := &models.RaceState{
+		TrackLength:    5891,
+		PlayerCarIndex: 19,
+		Position:       3,
+		CurrentLap:     5,
+		Speed:          200,
+		SessionType:    1,
+		DriverStatus:   4,
+	}
+	st.GridPositions[19] = models.GridPosition{CarIndex: 19, LapDistance: 1000, ResultStatus: 2, DriverStatus: 4, Position: 3}
+	// Only car behind is at P+1 (Position 4).
+	st.GridPositions[3] = models.GridPosition{CarIndex: 3, LapDistance: 850, ResultStatus: 2, DriverStatus: 4, Position: 4}
+
+	w, bus := newProxWatcherFor(st)
+	now := time.Now()
+	seedHistory(w, 3, []proxSample{
+		{at: now.Add(-3 * time.Second), signedM: -300, totalM: 0},
+		{at: now.Add(-2 * time.Second), signedM: -250, totalM: 50},
+		{at: now.Add(-1 * time.Second), signedM: -200, totalM: 100},
+	})
+	w.tick()
+
+	if got := len(bus.PeekEvents()); got != 0 {
+		t.Errorf("expected no traffic_update when only car is P+1 (owned by closing_threat), got %d", got)
 	}
 }
 

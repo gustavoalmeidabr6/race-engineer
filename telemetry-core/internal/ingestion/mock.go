@@ -12,7 +12,14 @@ import (
 	"github.com/rs/zerolog/log"
 	"github.com/tusharbhardwaj/race-engineer/telemetry-core/internal/config"
 	"github.com/tusharbhardwaj/race-engineer/telemetry-core/internal/packets"
+	"github.com/tusharbhardwaj/race-engineer/telemetry-core/internal/trackmap"
 )
+
+// mockTrackID is the F1 25 track the mock generator pretends to run. Kept in
+// sync with buildSession() below. When the trackmap registry has a curated
+// centerline for this id, buildMotion() lays cars on the real shape instead
+// of a generic circle.
+const mockTrackID int8 = 0 // Melbourne
 
 // ---------------------------------------------------------------------------
 // Track profile: a simplified ~5300 m circuit with 3 sectors.
@@ -88,6 +95,11 @@ type MockGenerator struct {
 	startTime  time.Time
 	totalLaps  uint8
 
+	// trackMap is optional — when non-nil and the configured mockTrackID has
+	// a curated centerline, buildMotion() lays cars on the real track shape.
+	trackMap  *trackmap.Registry
+	trackInfo *trackmap.TrackInfo // resolved from trackMap at init time
+
 	cars    [22]carState
 	weather mockWeather
 
@@ -137,6 +149,7 @@ func (mg *MockGenerator) Run(ctx context.Context, cfg *config.Config, packetChan
 	tickSession := time.NewTicker(2 * time.Second)       // Session
 	tickHistory := time.NewTicker(5 * time.Second)       // SessionHistory
 	tickEvent := time.NewTicker(45 * time.Second)        // Periodic event triggers (OVTK only)
+	tickParticipants := time.NewTicker(5 * time.Second)  // Participants (driver names)
 
 	defer tick20Hz.Stop()
 	defer tick10Hz.Stop()
@@ -144,9 +157,13 @@ func (mg *MockGenerator) Run(ctx context.Context, cfg *config.Config, packetChan
 	defer tickSession.Stop()
 	defer tickHistory.Stop()
 	defer tickEvent.Stop()
+	defer tickParticipants.Stop()
 
-	// Send a lights-out event at start.
+	// Send a lights-out event at start, plus a participants packet so the
+	// roster has names from the very first frame instead of waiting up to
+	// 5s for the periodic ticker.
 	mg.emit(packetChan, packetsRx, mg.buildEvent("LGOT", 0))
+	mg.emit(packetChan, packetsRx, mg.buildParticipants())
 
 	for {
 		select {
@@ -178,6 +195,8 @@ func (mg *MockGenerator) Run(ctx context.Context, cfg *config.Config, packetChan
 			if pkt := mg.maybeEvent(); pkt != nil {
 				mg.emit(packetChan, packetsRx, pkt)
 			}
+		case <-tickParticipants.C:
+			mg.emit(packetChan, packetsRx, mg.buildParticipants())
 		}
 	}
 }
@@ -198,6 +217,13 @@ func (mg *MockGenerator) init() {
 	mg.sessionUID = rand.Uint64()
 	mg.startTime = time.Now()
 	mg.totalLaps = 58
+
+	// Resolve the curated track once. nil result is fine — buildMotion()
+	// falls back to the circle layout when trackInfo or its centerline is
+	// missing.
+	if mg.trackMap != nil {
+		mg.trackInfo = mg.trackMap.Lookup(mockTrackID)
+	}
 
 	mg.weather = mockWeather{
 		weather:   0,
@@ -486,25 +512,74 @@ func (mg *MockGenerator) buildMotion() []byte {
 	pkt := packets.PacketMotionData{
 		Header: mg.header(0),
 	}
+	// Try the curated racing line first; cheaply samples (x, z) by
+	// lap_distance for each car. Falls through to the legacy oval when no
+	// centerline has been baked for the configured mockTrackID.
+	useCenterline := mg.trackInfo != nil && len(mg.trackInfo.Centerline) >= 2
+
 	for i := 0; i < 22; i++ {
 		c := &mg.cars[i]
 		seg := mg.segmentAt(c.distance)
 
-		// Crude world position: lay the track along a rough oval.
-		angle := float64(c.distance) / float64(trackLength) * 2 * math.Pi
+		var x, z, yaw float32
+		// Per-car perpendicular lane offset so 22 cars stacked on the start
+		// straight at lap=1 still render as distinct dots on the live map.
+		// Alternates sides by car_index. ±2 m kept small so the visual stays
+		// believable; the dashboard's own anti-overlap spread does the rest.
+		laneOffset := float32(((i % 2) * 2 - 1)) * float32(2.0) * float32((i/2)+1)
+		if laneOffset > 16 {
+			laneOffset = 16
+		} else if laneOffset < -16 {
+			laneOffset = -16
+		}
+
+		if useCenterline {
+			px, pz, ok := mg.trackInfo.SamplePosition(c.distance)
+			// Cheap tangent + outward normal from the next sample point so
+			// the lane offset spreads cars across the track width, not
+			// along the direction of travel.
+			nx, ny, ok2 := mg.trackInfo.SamplePosition(c.distance + 5)
+			if ok && ok2 {
+				tx, tz := nx-px, ny-pz
+				tlen := float32(math.Hypot(float64(tx), float64(tz)))
+				if tlen > 0 {
+					tx /= tlen
+					tz /= tlen
+				}
+				x = px - tz*laneOffset
+				z = pz + tx*laneOffset
+				yaw = float32(math.Atan2(float64(tz), float64(tx)))
+			} else if ok {
+				x = px
+				z = pz
+			}
+		}
+
+		if !useCenterline || (x == 0 && z == 0) {
+			// Legacy oval — lay the track along a rough circle so the mock
+			// still renders something when no centerline is curated.
+			angle := float64(c.distance) / float64(trackLength) * 2 * math.Pi
+			x = float32(math.Cos(angle)) * 500
+			z = float32(math.Sin(angle)) * 500
+			yaw = float32(angle)
+		}
+
+		// Velocity vector lines up with yaw (heading) so the live map's
+		// future heading-arrow logic stays correct.
+		speedMs := c.speed / 3.6
 		pkt.CarMotionData[i] = packets.CarMotionData{
-			WorldPositionX:   float32(math.Cos(angle)) * 500,
-			WorldPositionY:   2.0, // height above sea level
-			WorldPositionZ:   float32(math.Sin(angle)) * 500,
-			WorldVelocityX:   c.speed / 3.6 * float32(-math.Sin(angle)),
-			WorldVelocityY:   0,
-			WorldVelocityZ:   c.speed / 3.6 * float32(math.Cos(angle)),
-			GForceLateral:    randF32(-2.5, 2.5),
+			WorldPositionX:     x,
+			WorldPositionY:     2.0,
+			WorldPositionZ:     z,
+			WorldVelocityX:     speedMs * float32(math.Cos(float64(yaw))),
+			WorldVelocityY:     0,
+			WorldVelocityZ:     speedMs * float32(math.Sin(float64(yaw))),
+			GForceLateral:      randF32(-2.5, 2.5),
 			GForceLongitudinal: gForceForSeg(seg),
-			GForceVertical:   randF32(-0.3, 0.3),
-			Yaw:              float32(angle),
-			Pitch:            randF32(-0.05, 0.05),
-			Roll:             randF32(-0.1, 0.1),
+			GForceVertical:     randF32(-0.3, 0.3),
+			Yaw:                yaw,
+			Pitch:              randF32(-0.05, 0.05),
+			Roll:               randF32(-0.1, 0.1),
 		}
 	}
 	return writePacket(&pkt)
@@ -850,6 +925,48 @@ func (mg *MockGenerator) buildSessionHistory() []byte {
 		TyreVisualCompound: 16,
 	}
 
+	return writePacket(&pkt)
+}
+
+// mockDriverSurnames seeds the Participants packet so the dashboard
+// leaderboard shows recognisable names instead of `#0..#21`. Order is
+// car_index → surname; the player slot (car_index 0) gets the first
+// entry. These are stand-ins, not a real grid; tweak freely.
+var mockDriverSurnames = [22]string{
+	"VERSTAPPEN", "HAMILTON", "LECLERC", "RUSSELL", "NORRIS",
+	"PIASTRI", "ALONSO", "SAINZ", "PEREZ", "STROLL",
+	"GASLY", "OCON", "ALBON", "TSUNODA", "HULKENBERG",
+	"MAGNUSSEN", "BOTTAS", "ZHOU", "DERUYTER", "LAWSON",
+	"DOOHAN", "BEARMAN",
+}
+
+// buildParticipants emits a Participants packet (id 4) for the 22 mock
+// cars. Required so the in-memory Roster picks up surnames; without it,
+// every downstream surface (leaderboard, comms, voice) refers to cars by
+// index. Emitted slowly (every few seconds) — the roster is sticky per
+// session_uid.
+func (mg *MockGenerator) buildParticipants() []byte {
+	pkt := packets.PacketParticipantsData{
+		Header:        mg.header(4),
+		NumActiveCars: 22,
+	}
+	for i := 0; i < 22; i++ {
+		surname := mockDriverSurnames[i]
+		var nameBuf [32]byte
+		copy(nameBuf[:], surname)
+		pkt.Participants[i] = packets.ParticipantData{
+			AIControlled:    1,
+			DriverID:        255, // network/AI driver — forces name fallback
+			TeamID:          uint8(i / 2),
+			RaceNumber:      uint8(i + 1),
+			Nationality:     1,
+			Name:            nameBuf,
+			ShowOnlineNames: 1,
+			TechLevel:       2025,
+		}
+	}
+	// Mark the player slot.
+	pkt.Participants[0].AIControlled = 0
 	return writePacket(&pkt)
 }
 
