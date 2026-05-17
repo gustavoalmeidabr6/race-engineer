@@ -10,8 +10,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
-	"syscall"
 	"time"
 )
 
@@ -54,7 +54,12 @@ func (a *App) shutdown(ctx context.Context) {
 		return
 	}
 	log.Printf("stopping telemetry-core pid=%d", a.cmd.Process.Pid)
-	_ = a.cmd.Process.Signal(syscall.SIGTERM)
+	// On unix, send SIGTERM and give the server up to 5s to flush. On
+	// Windows the signal API is impoverished — sendShutdownSignal just
+	// does Kill() (graceful shutdown there would need a JobObject). The
+	// 5s grace window is unix-only; the windows path falls through to the
+	// timeout-Kill immediately.
+	_ = sendShutdownSignal(a.cmd)
 	done := make(chan error, 1)
 	go func() { done <- a.cmd.Wait() }()
 	select {
@@ -81,7 +86,7 @@ func (a *App) boot() error {
 		return fmt.Errorf("seed workspace: %w", err)
 	}
 
-	binPath := filepath.Join(a.dataDir, "telemetry-core")
+	binPath := filepath.Join(a.dataDir, exeName("telemetry-core"))
 	if err := writeBinaryIfChanged(binPath, coreBinary); err != nil {
 		return fmt.Errorf("install binary: %w", err)
 	}
@@ -92,7 +97,7 @@ func (a *App) boot() error {
 	// gracefully and the rest of the app keeps working.
 	opencodePath := ""
 	if len(opencodeBinary) > 0 {
-		opencodePath = filepath.Join(a.dataDir, "opencode")
+		opencodePath = filepath.Join(a.dataDir, exeName("opencode"))
 		if err := writeBinaryIfChanged(opencodePath, opencodeBinary); err != nil {
 			log.Printf("install opencode failed: %v — Data Analyst will be disabled", err)
 			opencodePath = ""
@@ -288,6 +293,17 @@ func envOr(key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+// exeName appends `.exe` on Windows so the OS will actually execute the
+// file. The //go:embed directives keep the literal name without an
+// extension (the embed packs raw bytes — it doesn't care what format
+// they're in), and we restore the suffix at extract time per platform.
+func exeName(name string) string {
+	if runtime.GOOS == "windows" {
+		return name + ".exe"
+	}
+	return name
 }
 
 // alreadyRunning probes :8081 and returns true if /health answers 200

@@ -1,4 +1,4 @@
-.PHONY: dev start mock stop build analyst migrate-config configtool app install-app download-opencode sync-da-seed
+.PHONY: dev start mock stop build analyst migrate-config configtool app install-app download-opencode sync-da-seed app-windows dist-windows
 
 # Recommended developer command — Go telemetry-core + Vite, no Python.
 # After Phase 3 the runtime is pure Go (TTS/STT/Live all in-binary), so
@@ -65,32 +65,50 @@ analyst:
 	cd workspace && opencode serve --port $${OPENCODE_PORT:-4095}
 
 # Download a pinned opencode binary into desktop/RaceEngineer/bin/opencode so
-# the Wails .app can embed it via //go:embed. Skip if the file already
-# exists and is non-empty (re-run with `make download-opencode FORCE=1` to
-# bounce). darwin/arm64 is the only target today; cross-builds slot in as
-# additional case branches.
+# the Wails .app / .exe can embed it via //go:embed. Skip if the file
+# already exists and is non-empty (re-run with `make download-opencode
+# FORCE=1` to bounce). darwin/arm64, linux/x64, linux/arm64 and windows/x64
+# are wired here; cross-builds slot in as additional case branches.
+#
+# Notes on Windows: when this target runs under git bash on a Windows CI
+# runner, uname -s reports MINGW64_NT or MSYS_NT and the asset OS is
+# `windows`. The file inside the zip is `opencode.exe`, but the embed
+# directive in app.go is the literal path `bin/opencode` (no extension —
+# //go:embed treats the path as opaque bytes), so we strip the suffix on
+# write. app.go appends .exe at runtime via runtime.GOOS.
 OPENCODE_VERSION ?= 1.15.3
 OPENCODE_BIN_PATH := desktop/RaceEngineer/bin/opencode
+
+# Portable file-size helper: BSD stat (-f%z) doesn't exist on Linux / git
+# bash, and GNU stat (-c%s) doesn't exist on macOS. `wc -c <file` works
+# everywhere.
+file_size = $$(wc -c < "$(1)" | tr -d ' ')
 
 download-opencode:
 	@mkdir -p $(dir $(OPENCODE_BIN_PATH))
 	@if [ -s "$(OPENCODE_BIN_PATH)" ] && [ -z "$(FORCE)" ]; then \
-		echo "opencode already present at $(OPENCODE_BIN_PATH) ($$(stat -f%z $(OPENCODE_BIN_PATH)) bytes) — pass FORCE=1 to re-download"; \
+		echo "opencode already present at $(OPENCODE_BIN_PATH) ($(call file_size,$(OPENCODE_BIN_PATH)) bytes) — pass FORCE=1 to re-download"; \
 		exit 0; \
 	fi
 	@os_lc=$$(uname -s | tr '[:upper:]' '[:lower:]'); \
 	arch=$$(uname -m); \
 	case "$$arch" in arm64|aarch64) asset_arch=arm64;; x86_64) asset_arch=x64;; *) echo "unsupported arch: $$arch"; exit 1;; esac; \
-	case "$$os_lc" in darwin) asset_os=darwin;; linux) asset_os=linux;; *) echo "unsupported os: $$os_lc"; exit 1;; esac; \
+	zip_inner=opencode; \
+	case "$$os_lc" in \
+		darwin) asset_os=darwin;; \
+		linux) asset_os=linux;; \
+		mingw*|msys*|cygwin*|windows*) asset_os=windows; zip_inner=opencode.exe;; \
+		*) echo "unsupported os: $$os_lc"; exit 1;; \
+	esac; \
 	url="https://github.com/sst/opencode/releases/download/v$(OPENCODE_VERSION)/opencode-$$asset_os-$$asset_arch.zip"; \
 	echo "Downloading $$url"; \
 	tmpdir=$$(mktemp -d); \
 	curl -fL --retry 3 -o "$$tmpdir/opencode.zip" "$$url"; \
 	unzip -q -o "$$tmpdir/opencode.zip" -d "$$tmpdir"; \
-	mv "$$tmpdir/opencode" "$(OPENCODE_BIN_PATH)"; \
-	chmod +x "$(OPENCODE_BIN_PATH)"; \
+	mv "$$tmpdir/$$zip_inner" "$(OPENCODE_BIN_PATH)"; \
+	chmod +x "$(OPENCODE_BIN_PATH)" 2>/dev/null || true; \
 	rm -rf "$$tmpdir"; \
-	echo "Installed opencode $(OPENCODE_VERSION) at $(OPENCODE_BIN_PATH) ($$(stat -f%z $(OPENCODE_BIN_PATH)) bytes)"
+	echo "Installed opencode $(OPENCODE_VERSION) at $(OPENCODE_BIN_PATH) ($(call file_size,$(OPENCODE_BIN_PATH)) bytes)"
 
 # Mirror the canonical workspace/da-workspace-seed/ into desktop/RaceEngineer/
 # so //go:embed picks up the latest seed when building the .app.
@@ -125,14 +143,14 @@ app: sync-da-seed download-opencode
 		exit 1; \
 	fi
 	@# Reject placeholder / suspiciously small binaries — the real darwin/arm64
-	@# binary is ~85 MB; anything under 1 MB is a checked-in stub.
-	@opencode_size=$$(stat -f%z "$(OPENCODE_BIN_PATH)"); \
+	@# binary is ~85 MB, windows/x64 ~160 MB; anything under 1 MB is a stub.
+	@opencode_size=$(call file_size,$(OPENCODE_BIN_PATH)); \
 	if [ "$$opencode_size" -lt 1048576 ]; then \
 		echo "ERROR: $(OPENCODE_BIN_PATH) is only $$opencode_size bytes — likely a placeholder."; \
 		echo "       Refusing to build the .app. Run 'make download-opencode FORCE=1' to re-fetch."; \
 		exit 1; \
 	fi
-	@echo "  ✓ opencode bundled ($$(stat -f%z "$(OPENCODE_BIN_PATH)") bytes)"
+	@echo "  ✓ opencode bundled ($(call file_size,$(OPENCODE_BIN_PATH)) bytes)"
 	@command -v $(WAILS) >/dev/null 2>&1 || { \
 		echo "ERROR: wails CLI not found at $(WAILS)."; \
 		echo "Install with: go install github.com/wailsapp/wails/v2/cmd/wails@latest"; \
@@ -162,3 +180,54 @@ install-app: app
 	@echo "Installed: $(INSTALL_DEST)"
 	@/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$(INSTALL_DEST)/Contents/Info.plist" \
 		| awk '{print "Version: " $$0}'
+
+# ── Windows build (driven by .github/workflows/release-windows.yml) ──────
+# Mirrors the macOS `app` target. Runs on a windows-latest GH Actions
+# runner under git bash. Cross-compiling from macOS is intentionally NOT
+# supported — Wails requires native Windows tooling (gcc-mingw, WebView2
+# headers) and the matrix runner is the path of least resistance.
+APP_EXE_WIN := desktop/RaceEngineer/build/bin/RaceEngineer.exe
+DIST_ZIP_WIN := desktop/RaceEngineer/build/bin/RaceEngineer-windows-x64.zip
+
+app-windows: sync-da-seed download-opencode
+	@echo "Building RaceEngineer.exe (Wails bundle: Go core + opencode + dashboard)..."
+	@# Same opencode sanity gate as the macOS `app` target — refuse to ship
+	@# a build where the Data Analyst would be silently disabled.
+	@if [ ! -s "$(OPENCODE_BIN_PATH)" ]; then \
+		echo "ERROR: $(OPENCODE_BIN_PATH) is missing or 0 bytes after download-opencode."; \
+		exit 1; \
+	fi
+	@opencode_size=$(call file_size,$(OPENCODE_BIN_PATH)); \
+	if [ "$$opencode_size" -lt 1048576 ]; then \
+		echo "ERROR: $(OPENCODE_BIN_PATH) is only $$opencode_size bytes — likely a placeholder."; \
+		exit 1; \
+	fi
+	@echo "  ✓ opencode bundled ($(call file_size,$(OPENCODE_BIN_PATH)) bytes)"
+	@command -v $(WAILS) >/dev/null 2>&1 || command -v wails >/dev/null 2>&1 || { \
+		echo "ERROR: wails CLI not found."; \
+		echo "Install with: go install github.com/wailsapp/wails/v2/cmd/wails@latest"; \
+		exit 1; \
+	}
+	@# Compile telemetry-core for windows/amd64 — the //go:embed directive in
+	@# app.go references the literal path bin/telemetry-core (no extension),
+	@# so we keep the output filename extensionless even on Windows.
+	@echo "  • Compiling telemetry-core for embed (GOOS=windows GOARCH=amd64)"
+	@rm -f desktop/RaceEngineer/bin/telemetry-core
+	cd telemetry-core && GOOS=windows GOARCH=amd64 go build -o ../desktop/RaceEngineer/bin/telemetry-core ./cmd/server
+	cd desktop/RaceEngineer && (command -v wails >/dev/null 2>&1 && wails || $(WAILS)) build -platform windows/amd64 -clean
+	@echo "Built: $(APP_EXE_WIN)"
+
+# dist-windows wraps the produced .exe in the zip filename the website
+# expects: github.com/iamtushar324/race-enginer/releases/latest/download/
+# RaceEngineer-windows-x64.zip
+dist-windows: app-windows
+	@if [ ! -f "$(APP_EXE_WIN)" ]; then \
+		echo "ERROR: $(APP_EXE_WIN) not found — did make app-windows succeed?"; \
+		exit 1; \
+	fi
+	@rm -f "$(DIST_ZIP_WIN)"
+	@# `zip -j` strips directory paths so the archive root holds RaceEngineer.exe
+	@# directly, matching what the website's "Download for Windows" button
+	@# leads users to expect after extraction.
+	cd $$(dirname "$(APP_EXE_WIN)") && zip -j "$$(basename "$(DIST_ZIP_WIN)")" "$$(basename "$(APP_EXE_WIN)")"
+	@echo "Built: $(DIST_ZIP_WIN) ($(call file_size,$(DIST_ZIP_WIN)) bytes)"

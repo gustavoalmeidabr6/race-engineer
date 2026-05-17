@@ -265,7 +265,7 @@
       <p class="mono text-xs uppercase tracking-widest text-racered">Download</p>
       <h2 class="text-3xl md:text-4xl font-extrabold mt-2">Get Race Engineer</h2>
       <p class="mt-3 text-slate-400 max-w-2xl">
-        Free and open source under MIT. Bring your own LLM API key. macOS is live today; Windows and Linux builds are in progress.
+        Free and open source under MIT. Bring your own LLM API key. macOS and Windows are live today; Linux is in progress.
       </p>
 
       <div class="mt-8 grid md:grid-cols-3 gap-4" id="download-grid">
@@ -280,15 +280,15 @@
           <div class="mt-5 btn-primary rounded-md px-3 py-2 text-sm font-semibold text-center">Download for macOS</div>
         </a>
         <!-- Windows -->
-        <div id="dl-win" data-os="win" class="card rounded-xl p-5 opacity-80">
+        <a id="dl-win" data-os="win" href="#" class="card rounded-xl p-5 hover:border-racered/60 transition group">
           <div class="flex items-center justify-between">
             <div class="text-2xl">🪟</div>
-            <span class="mono text-[10px] tracking-widest text-slate-500 uppercase">Coming soon</span>
+            <span class="mono text-[10px] tracking-widest text-emerald-400 uppercase">Available</span>
           </div>
           <h3 class="font-bold text-lg mt-3">Windows</h3>
           <p class="text-slate-400 text-sm mt-1">x64 · .zip</p>
-          <div class="mt-5 btn-disabled rounded-md px-3 py-2 text-sm font-semibold text-center">In progress</div>
-        </div>
+          <div class="mt-5 btn-primary rounded-md px-3 py-2 text-sm font-semibold text-center">Download for Windows</div>
+        </a>
         <!-- Linux -->
         <div id="dl-linux" data-os="linux" class="card rounded-xl p-5 opacity-80">
           <div class="flex items-center justify-between">
@@ -350,8 +350,9 @@
   };
   const LABELS = { mac: 'macOS', win: 'Windows', linux: 'Linux' };
 
-  // Wire macOS link (only live download today)
+  // Wire the live downloads (macOS + Windows). Linux still in progress.
   document.getElementById('dl-mac').href = FILES.mac;
+  document.getElementById('dl-win').href = FILES.win;
 
   // Detect platform → personalize hero CTA
   function detectOS() {
@@ -369,11 +370,12 @@
     heroSub.textContent = 'Apple silicon · ~80 MB · macOS 13+';
     document.getElementById('hero-cta').href = FILES.mac;
   } else if (os === 'win') {
-    heroLabel.textContent = 'Windows build coming soon';
-    heroSub.textContent = 'macOS is live today — Windows is in progress. Star the repo to get notified.';
+    heroLabel.textContent = 'Download for Windows';
+    heroSub.textContent = 'Windows 11 · x64 · .zip · WebView2 preinstalled';
+    document.getElementById('hero-cta').href = FILES.win;
   } else if (os === 'linux') {
     heroLabel.textContent = 'Linux build coming soon';
-    heroSub.textContent = 'macOS is live today — Linux is in progress. Star the repo to get notified.';
+    heroSub.textContent = 'macOS and Windows are live today — Linux is in progress. Star the repo to get notified.';
   } else {
     heroLabel.textContent = 'See downloads';
     heroSub.textContent = '';

@@ -1,0 +1,108 @@
+name: Release — Windows
+
+# Build the Windows .exe + zip and attach it to a GitHub release.
+#
+# Triggers:
+#   - push of a tag matching v*-win   (the recommended path — keeps
+#     macOS/Windows release cadence independent)
+#   - push of a tag matching v*       (drafts a release with the windows
+#     asset if other platform workflows land later)
+#   - workflow_dispatch               (manual run for testing; uploads to
+#     a draft release named after the run number)
+#
+# What it does NOT do yet:
+#   - No code signing → users see Windows SmartScreen "Unrecognized app"
+#   - No installer (NSIS/MSIX) → ships a raw .exe inside a .zip,
+#     matching what website/index.html links to
+
+on:
+  push:
+    tags:
+      - 'v*-win'
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write  # required to create / upload to releases
+
+jobs:
+  build:
+    runs-on: windows-latest
+    # Run every shell step under git bash so the bash-flavoured Makefile
+    # (mktemp -d, case statements, wc -c) works without rewriting it for
+    # PowerShell. windows-latest ships git bash via Git for Windows.
+    defaults:
+      run:
+        shell: bash
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.25.x'
+          cache-dependency-path: |
+            telemetry-core/go.sum
+            desktop/RaceEngineer/go.sum
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: dashboard/package-lock.json
+
+      - name: Install dashboard deps
+        working-directory: dashboard
+        run: npm ci
+
+      # Wails v2 CLI — pinned major to keep CI deterministic. go install
+      # writes the binary into $(go env GOPATH)/bin which setup-go adds to
+      # PATH on Windows, so the Makefile can find it via `wails`.
+      - name: Install Wails CLI
+        run: |
+          go install github.com/wailsapp/wails/v2/cmd/wails@v2.10.1
+          wails version
+
+      # Sanity check: native gcc must be on PATH for CGO go-duckdb compile.
+      # windows-latest ships Git's MinGW gcc — surface a clear error early
+      # if that ever stops being true.
+      - name: Verify CGO toolchain
+        run: |
+          gcc --version
+          echo "CGO_ENABLED=$(go env CGO_ENABLED)"
+
+      - name: Build RaceEngineer.exe and dist zip
+        env:
+          # Explicit — CGO is required for the embedded telemetry-core's
+          # go-duckdb dependency on windows/amd64.
+          CGO_ENABLED: '1'
+        run: |
+          make dist-windows
+
+      - name: Inspect build artifacts
+        run: |
+          ls -la desktop/RaceEngineer/build/bin/
+          echo "zip size:"
+          wc -c < desktop/RaceEngineer/build/bin/RaceEngineer-windows-x64.zip
+
+      - name: Upload artifact (for workflow_dispatch debugging)
+        if: github.event_name == 'workflow_dispatch'
+        uses: actions/upload-artifact@v4
+        with:
+          name: RaceEngineer-windows-x64
+          path: desktop/RaceEngineer/build/bin/RaceEngineer-windows-x64.zip
+          retention-days: 14
+
+      - name: Attach to GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: desktop/RaceEngineer/build/bin/RaceEngineer-windows-x64.zip
+          # Keep the release a draft for tags ending in -win (preview
+          # cadence) until you've smoke-tested the .exe; promote manually
+          # via the GitHub UI or `gh release edit <tag> --draft=false`.
+          draft: ${{ endsWith(github.ref, '-win') }}
+          prerelease: ${{ contains(github.ref, '-preview') || endsWith(github.ref, '-win') }}
+          generate_release_notes: true
