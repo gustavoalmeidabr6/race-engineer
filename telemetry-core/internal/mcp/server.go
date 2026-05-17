@@ -27,16 +27,13 @@ import (
 // are optional — tools degrade with a clear error to the LLM when a
 // dependency is missing.
 type Deps struct {
-	Brain          *brain.RaceBrain
-	Reader         *sql.DB
-	InsightLog     *insights.Log
-	Cache          func() *models.RaceState
-	Triggers       *TriggerQueue
-	Skills         *SkillRegistry
-	Activity       *ActivityHub // optional — when set, every tool call is broadcast to /api/pi_agent/stream
-	APIBase        string       // e.g. http://localhost:8081 — used for tools that self-call existing handlers
-	MaxPriority    int          // cap on push_insight priority
-	TriggerTimeout time.Duration
+	Brain       *brain.RaceBrain
+	Reader      *sql.DB
+	InsightLog  *insights.Log
+	Cache       func() *models.RaceState
+	Activity    *ActivityHub // optional — when set, every tool call is broadcast to subscribers
+	APIBase     string       // e.g. http://localhost:8081 — used for tools that self-call existing handlers
+	MaxPriority int          // cap on push_insight priority
 }
 
 // Server wraps mcp-go's MCPServer + StreamableHTTPServer so it can be
@@ -48,13 +45,12 @@ type Server struct {
 	http   *http.Client
 }
 
-// NewServer builds the MCP server with every pi-agent tool registered.
+// NewServer builds the MCP server with every read-only data tool plus the
+// gated push_insight writer registered. Consumed by Gemini Live and the
+// bundled opencode Data Analyst.
 func NewServer(deps *Deps) *Server {
 	if deps.MaxPriority == 0 {
 		deps.MaxPriority = 3
-	}
-	if deps.TriggerTimeout == 0 {
-		deps.TriggerTimeout = 10 * time.Second
 	}
 
 	hooks := &mcpserver.Hooks{}

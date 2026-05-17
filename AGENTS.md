@@ -47,7 +47,8 @@ telemetry-core/          Go service
     ingestion/           UDP packet parsing
     insights/            Rule engine, corner reminders, proximity watcher
     intelligence/        CommsGate, Gemini advisor, analyst
-    mcp/                 MCP server (pi-agent tool surface)
+    mcp/                 MCP server (shared by Gemini Live + Data Analyst)
+    analyst/             opencode (ACP) Data Analyst driver
     plan/                Race plan store
     state/               Atomic latest-state cache (race/tires/energy/competitors/pace/...)
     storage/             DuckDB schema + reader
@@ -56,8 +57,9 @@ telemetry-core/          Go service
     voice/               In-Go Gemini Live agent + Live tools
     audio/               External-music-player ducking or pausing (per-OS: macOS osascript/AppleScript, Linux pactl + playerctl/MPRIS, Windows WASAPI + media key)
 dashboard/               React 19 + Vite + Tailwind v4
-python/pi_agent/         Sandboxed pi-agent (only spawned when PI_AGENT_MODE=on)
-workspace/               Context files + DuckDB + sessions/ + tracks/ + pi_skills/
+workspace/               Context files + DuckDB + sessions/ + tracks/
+workspace/da-workspace-seed/  Seed copied into ~/.race-engineer/da-workspace on first boot
+desktop/RaceEngineer/    Wails .app bundle (embeds telemetry-core + opencode + da-workspace seed)
 workspace/bin/           Built CLIs
 ```
 
@@ -85,7 +87,10 @@ Common knobs (see `schema.go` for the full list):
 | `API_PORT` | `8081` | REST + WS |
 | `LLM_PROVIDER` | `gemini` | `gemini`, `anthropic`, `openai` |
 | `VOICE_MODE` | `live_only` | `live_only` \| `ptt_only` \| `both` (Live owns audio out) |
-| `PI_AGENT_MODE` | `off` | `on` spawns `pi_agent_service.py` |
+| `DA_ENABLED` | `true` | Spawn the bundled opencode subprocess for the Data Analyst |
+| `DA_PROVIDER` | — | `gemini` \| `anthropic` \| `openai`; empty → opencode's own auth state decides |
+| `DA_MODEL` | — | Model override; empty → provider default |
+| `DA_WORKSPACE_DIR` | — | Override; empty → `~/.race-engineer/da-workspace` |
 | `HIFREQ_SAMPLE_RATE` | `2` | 20Hz UDP / N → hi-freq sampler stride (`0` to disable) |
 | `WS_PUSH_RATE` | `10` | Hz |
 | `TALK_LEVEL` | `5` | Insight verbosity 1–10 |
@@ -184,9 +189,9 @@ Use it in every `WHERE car_index = ...` clause.
 ### Brain / analyst / pi-agent
 
 - `GET /api/brain/snapshot[?format=json]` — telemetry + observations + recent radio + driver state + static context (markdown by default).
-- `POST /api/analyst/query` — async strategy Q&A: `{"question": "...", "context_topic": "...", "urgent": false}` → `202` with `job_id`. Answer lands as Observation under `analyst.<context_topic>`; `urgent=true` also broadcasts via `/api/strategy`. Deduped 30s on `(question, context_topic)`. When `PI_AGENT_MODE=on`, routes through pi-agent.
+- `POST /api/analyst/query` — async strategy Q&A: `{"question": "...", "context_topic": "...", "urgent": false}` → `202` with `job_id`. Answer lands as Observation under `analyst.<context_topic>`; `urgent=true` bumps the analyst_answer event from P3 → P4 so Gemini Live relays it sooner. Deduped 30s on `(question, context_topic)`. Routes through the in-process opencode Data Analyst when `DA_ENABLED=true`.
 - `GET /api/analyst/jobs` — in-flight jobs.
-- `GET /api/pi_agent/recent`, `GET /api/pi_agent/stream`.
+- `GET /api/analyst/recent`, `GET /api/analyst/stream`, `GET /api/analyst/status`.
 - `GET /api/agent/status`.
 
 ### Insights / strategy / driver query
@@ -221,30 +226,54 @@ Rule Engine (Go thresholds) ─▶ CommsGate (LLM: dedup + talk-level + radio tr
 - **CommsGate** (`internal/intelligence/comms_gate.go`) — central gate. `BuildContext()` injects track, lap, position, gaps, tire compound/age/wear, fuel/ERS/DRS, damage, weather, pit window. Last `TRANSCRIPT_PROMPT_LINES` transcript events are also injected so the LLM has cross-turn memory.
 - **Fanout** — WebSocket → dashboard, in-Go TTS → audio, `workspace/insights.md` append.
 
-### Pi Agent (`PI_AGENT_MODE=on`)
+### Data Analyst (`DA_ENABLED=true`)
 
-Sandboxed Python child (`pi_agent_service.py` + `python/pi_agent/`). Connects to
-the in-Go MCP server (mounted at `/mcp`) as its **only** outward channel — no
-shell, no `subprocess`/`requests`/`httpx`. CI test `tests/test_pi_agent_sandbox.py`
-enforces the absent-imports rule.
+Replaces the legacy hand-rolled pi-agent. The Go server (`internal/analyst/`)
+spawns **one** long-lived `opencode acp` child process per app boot and drives
+it via JSON-RPC 2.0 over stdin/stdout — the Agent Client Protocol from
+[zed-industries/agent-client-protocol](https://github.com/zed-industries/agent-client-protocol).
 
-Event-driven, no ticker. A planner long-polls `pull_next_trigger` and dispatches
-one of: `tires`, `brakes`, `pace`, `strategy`, `weather`, `energy`, `driving`,
-or `responder` (queries). Trigger sources, Go-side:
+The agent reaches back through MCP at `/mcp` for telemetry data (same surface
+Gemini Live uses) and through ACP callbacks (`fs/read_text_file`,
+`fs/write_text_file`) for the **self-evolving workspace** at
+`~/.race-engineer/da-workspace/` (or `<AppSupport>/da-workspace/` in the
+bundled .app).
 
-1. `POST /api/analyst/query` (preserves the old analyst contract).
-2. Lap-complete rollover (once per player lap).
-3. Every rule-engine insight.
+Workspace shape:
 
-Specialists load playbooks from `workspace/pi_skills/*.md` via `get_skill(name)`
-and write back through a focused MCP subset:
+```
+da-workspace/
+  AGENTS.md                       persona + tool roster + workflow (auto-loaded)
+  opencode.json                   MCP + model config (REGENERATED at every boot)
+  driver/{profile,soul,user}.md   driver context
+  tracks/{setup-notes,history}.md track context
+  .agents/skills/<name>/SKILL.md  9 personas migrated from old pi_skills
+  learnings/                      agent-written findings, auto-loaded next run
+  prompts/{lap_complete,significant_event,query}.md  trigger templates
+```
 
-- `write_observation(topic, …)` → brain at `pi_agent.<topic>`.
-- `submit_query_answer(job_id, answer, urgent)` → brain at `analyst.<context_topic>`.
-- `push_insight(insight, priority, source)` → `/api/strategy`, capped at `PI_AGENT_MAX_PRIORITY` (default 3).
+Triggers, Go-side:
 
-Add a skill: drop a markdown file into `workspace/pi_skills/` (see `_index.md` for
-frontmatter). Add an MCP tool: register in `telemetry-core/internal/mcp/tools.go`.
+1. `POST /api/analyst/query` (preserves the old async-query contract — returns
+   a `job_id`, the analyst answers via ACP, the answer becomes an
+   `analyst_answer` brain event so Gemini Live relays it).
+2. Lap-complete rollover (once per player lap → `prompts/lap_complete.md`).
+3. Every rule-engine significant-event (→ `prompts/significant_event.md`).
+
+The agent has exactly one writer tool: `push_insight` (caps at priority 3).
+Everything else is read-only telemetry. Self-evolving "learnings" land via
+the agent's own `write` / `edit` tools — opencode handles the file IO via
+ACP callbacks that we sandbox to the workspace directory.
+
+Add a skill: drop a `<name>/SKILL.md` into the workspace's `.agents/skills/`.
+opencode auto-discovers it. Add an MCP tool: register in
+`telemetry-core/internal/mcp/tools.go`.
+
+Distribution: the bundled `.app` extracts `opencode` from
+`desktop/RaceEngineer/bin/opencode` (built once via `make download-opencode`,
+gitignored) to `<AppSupport>/opencode` on first run. Terminal flows
+(`make dev`, `make start`) expect `opencode` on `$PATH` (e.g.
+`brew install sst/opencode/opencode`).
 
 #### Data access surface
 
@@ -256,7 +285,7 @@ frontmatter). Add an MCP tool: register in `telemetry-core/internal/mcp/tools.go
 | Past F1 sessions roster | `list_sessions` (start here for "last race at X") |
 | Arbitrary historical SQL | `query_sql` + `describe_schema` (no session filter is applied — scope it yourself per the timestamp recipe above) |
 | Cross-session dialogue | `get_session_history(scope='previous'` \| `'all'` \| `<session_uid>)` |
-| What this session already concluded | `get_brain_snapshot`, `recent_pi_observations`, `recent_insights` |
+| What this session already concluded | `get_brain_snapshot`, `recent_analyst_observations`, `recent_insights` |
 
 ## Gemini Live (in-Go)
 
@@ -290,7 +319,7 @@ the current lap against any past session on the same track.
 | `workspace/soul.md` | Race engineer personality / radio style |
 | `workspace/user.md` | Driver communication preferences |
 | `workspace/sessions/sess_<uid>.jsonl` | Per-F1-session transcript (append-only, splits at 10k lines into `-partN`) |
-| `workspace/pi_skills/*.md` | Pi-agent specialist playbooks |
+| `workspace/da-workspace-seed/` | Data Analyst seed (AGENTS.md + skills + driver/track context). Copied into the live workspace on first run. |
 | `workspace/tracks/<id>.json` | Baked centerlines (output of `bakecenterline`) |
 | `workspace/telemetry.duckdb` | Database |
 

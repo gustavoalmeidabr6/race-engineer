@@ -1,4 +1,4 @@
-.PHONY: dev start mock stop build analyst migrate-config configtool app install-app
+.PHONY: dev start mock stop build analyst migrate-config configtool app install-app download-opencode sync-da-seed
 
 # Recommended developer command — Go telemetry-core + Vite, no Python.
 # After Phase 3 the runtime is pure Go (TTS/STT/Live all in-binary), so
@@ -64,6 +64,41 @@ analyst:
 	@echo "Starting OpenCode analyst agent on port $${OPENCODE_PORT:-4095}..."
 	cd workspace && opencode serve --port $${OPENCODE_PORT:-4095}
 
+# Download a pinned opencode binary into desktop/RaceEngineer/bin/opencode so
+# the Wails .app can embed it via //go:embed. Skip if the file already
+# exists and is non-empty (re-run with `make download-opencode FORCE=1` to
+# bounce). darwin/arm64 is the only target today; cross-builds slot in as
+# additional case branches.
+OPENCODE_VERSION ?= 1.15.3
+OPENCODE_BIN_PATH := desktop/RaceEngineer/bin/opencode
+
+download-opencode:
+	@mkdir -p $(dir $(OPENCODE_BIN_PATH))
+	@if [ -s "$(OPENCODE_BIN_PATH)" ] && [ -z "$(FORCE)" ]; then \
+		echo "opencode already present at $(OPENCODE_BIN_PATH) ($$(stat -f%z $(OPENCODE_BIN_PATH)) bytes) — pass FORCE=1 to re-download"; \
+		exit 0; \
+	fi
+	@os_lc=$$(uname -s | tr '[:upper:]' '[:lower:]'); \
+	arch=$$(uname -m); \
+	case "$$arch" in arm64|aarch64) asset_arch=arm64;; x86_64) asset_arch=x64;; *) echo "unsupported arch: $$arch"; exit 1;; esac; \
+	case "$$os_lc" in darwin) asset_os=darwin;; linux) asset_os=linux;; *) echo "unsupported os: $$os_lc"; exit 1;; esac; \
+	url="https://github.com/sst/opencode/releases/download/v$(OPENCODE_VERSION)/opencode-$$asset_os-$$asset_arch.zip"; \
+	echo "Downloading $$url"; \
+	tmpdir=$$(mktemp -d); \
+	curl -fL --retry 3 -o "$$tmpdir/opencode.zip" "$$url"; \
+	unzip -q -o "$$tmpdir/opencode.zip" -d "$$tmpdir"; \
+	mv "$$tmpdir/opencode" "$(OPENCODE_BIN_PATH)"; \
+	chmod +x "$(OPENCODE_BIN_PATH)"; \
+	rm -rf "$$tmpdir"; \
+	echo "Installed opencode $(OPENCODE_VERSION) at $(OPENCODE_BIN_PATH) ($$(stat -f%z $(OPENCODE_BIN_PATH)) bytes)"
+
+# Mirror the canonical workspace/da-workspace-seed/ into desktop/RaceEngineer/
+# so //go:embed picks up the latest seed when building the .app.
+sync-da-seed:
+	@echo "Syncing da-workspace-seed → desktop/RaceEngineer/da-workspace-seed/"
+	@rm -rf desktop/RaceEngineer/da-workspace-seed
+	@cp -R workspace/da-workspace-seed desktop/RaceEngineer/da-workspace-seed
+
 # ── Desktop app (Wails bundle) ───────────────────────────────────────────
 # The user-facing "Race Engineer" Mac app lives at desktop/RaceEngineer/
 # and is a Wails wrapper that embeds the React dashboard via go:embed.
@@ -75,8 +110,29 @@ WAILS ?= $(HOME)/go/bin/wails
 APP_BUNDLE := desktop/RaceEngineer/build/bin/RaceEngineer.app
 INSTALL_DEST := /Applications/RaceEngineer.app
 
-app:
-	@echo "Building RaceEngineer.app (Wails bundle: Go core + embedded dashboard)..."
+app: sync-da-seed download-opencode
+	@echo "Building RaceEngineer.app (Wails bundle: Go core + opencode + dashboard)..."
+	@# Hard gate: refuse to ship an .app without a real opencode binary.
+	@# download-opencode (a prereq) is idempotent — it's a no-op when the
+	@# file is already present and non-empty, and fetches the configured
+	@# OPENCODE_VERSION otherwise. This assertion catches the case where
+	@# the download silently failed (CI without network, GitHub 503, etc.)
+	@# so a public build can never go out with the Data Analyst disabled.
+	@if [ ! -s "$(OPENCODE_BIN_PATH)" ]; then \
+		echo "ERROR: $(OPENCODE_BIN_PATH) is missing or 0 bytes after download-opencode."; \
+		echo "       Refusing to build the .app — the Data Analyst would be disabled at runtime."; \
+		echo "       Re-run with network access, or set OPENCODE_VERSION to a working release."; \
+		exit 1; \
+	fi
+	@# Reject placeholder / suspiciously small binaries — the real darwin/arm64
+	@# binary is ~85 MB; anything under 1 MB is a checked-in stub.
+	@opencode_size=$$(stat -f%z "$(OPENCODE_BIN_PATH)"); \
+	if [ "$$opencode_size" -lt 1048576 ]; then \
+		echo "ERROR: $(OPENCODE_BIN_PATH) is only $$opencode_size bytes — likely a placeholder."; \
+		echo "       Refusing to build the .app. Run 'make download-opencode FORCE=1' to re-fetch."; \
+		exit 1; \
+	fi
+	@echo "  ✓ opencode bundled ($$(stat -f%z "$(OPENCODE_BIN_PATH)") bytes)"
 	@command -v $(WAILS) >/dev/null 2>&1 || { \
 		echo "ERROR: wails CLI not found at $(WAILS)."; \
 		echo "Install with: go install github.com/wailsapp/wails/v2/cmd/wails@latest"; \

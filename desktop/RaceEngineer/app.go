@@ -18,8 +18,20 @@ import (
 //go:embed bin/telemetry-core
 var coreBinary []byte
 
+// opencodeBinary is the bundled `opencode acp` runtime the Data Analyst
+// spawns. Downloaded + checksummed via `make download-opencode`. When the
+// file is absent (e.g. local dev builds before the make target runs) the
+// embed evaluates to an empty slice and the analyst auto-disables — the
+// rest of the app still boots.
+//
+//go:embed bin/opencode
+var opencodeBinary []byte
+
 //go:embed all:workspace-seed
 var workspaceSeed embed.FS
+
+//go:embed all:da-workspace-seed
+var daWorkspaceSeed embed.FS
 
 // App owns the lifecycle of the embedded telemetry-core child process.
 type App struct {
@@ -74,6 +86,25 @@ func (a *App) boot() error {
 		return fmt.Errorf("install binary: %w", err)
 	}
 
+	// Extract the bundled opencode binary + seed the analyst's workspace.
+	// Both paths are best-effort: if opencode isn't bundled (length 0 — the
+	// `make download-opencode` step wasn't run) the analyst will degrade
+	// gracefully and the rest of the app keeps working.
+	opencodePath := ""
+	if len(opencodeBinary) > 0 {
+		opencodePath = filepath.Join(a.dataDir, "opencode")
+		if err := writeBinaryIfChanged(opencodePath, opencodeBinary); err != nil {
+			log.Printf("install opencode failed: %v — Data Analyst will be disabled", err)
+			opencodePath = ""
+		}
+	} else {
+		log.Printf("opencode binary not embedded (build with `make download-opencode` first) — Data Analyst will be disabled")
+	}
+	daWorkspaceDir := filepath.Join(a.dataDir, "da-workspace")
+	if err := seedDAWorkspace(daWorkspaceDir); err != nil {
+		log.Printf("seed da-workspace failed: %v", err)
+	}
+
 	apiKey := readAPIKey(a.dataDir)
 	if apiKey == "" {
 		log.Printf("GEMINI_API_KEY not configured. Create %s/.env with GEMINI_API_KEY=...", a.dataDir)
@@ -113,6 +144,13 @@ func (a *App) boot() error {
 		"API_PORT=8081",
 		"TELEMETRY_MODE="+envOr("TELEMETRY_MODE", "mock"),
 		"VOICE_MODE="+envOr("VOICE_MODE", "live_only"),
+		// Data Analyst: point telemetry-core at the extracted opencode
+		// binary and the seeded da-workspace. Empty OPENCODE_BIN tells
+		// the analyst package to fall back to PATH lookup (which will
+		// likely fail in a sandboxed .app, and the runtime degrades
+		// gracefully when it does).
+		"OPENCODE_BIN="+opencodePath,
+		"DA_WORKSPACE_DIR="+daWorkspaceDir,
 	)
 	a.cmd.Stdout = os.Stdout
 	a.cmd.Stderr = os.Stderr
@@ -159,6 +197,40 @@ func writeBinaryIfChanged(dst string, data []byte) error {
 		return err
 	}
 	return os.Chmod(dst, 0o755)
+}
+
+// seedDAWorkspace mirrors seedWorkspace for the Data Analyst's own
+// workspace (AGENTS.md, .agents/skills/, driver context, prompts). Same
+// copy-don't-overwrite rule so user edits persist across upgrades.
+func seedDAWorkspace(dst string) error {
+	if err := os.MkdirAll(dst, 0o755); err != nil {
+		return err
+	}
+	return fs.WalkDir(daWorkspaceSeed, "da-workspace-seed", func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		rel := strings.TrimPrefix(path, "da-workspace-seed")
+		rel = strings.TrimPrefix(rel, "/")
+		if rel == "" {
+			return nil
+		}
+		target := filepath.Join(dst, rel)
+		if d.IsDir() {
+			return os.MkdirAll(target, 0o755)
+		}
+		if _, err := os.Stat(target); err == nil {
+			return nil
+		}
+		b, err := daWorkspaceSeed.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+			return err
+		}
+		return os.WriteFile(target, b, 0o644)
+	})
 }
 
 func seedWorkspace(dst string) error {

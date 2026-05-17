@@ -51,8 +51,9 @@ var noisyPollingPaths = map[string]struct{}{
 	"/api/telemetry/latest":  {}, // dashboard + Live agent's get_race_state tool, sub-second
 	"/api/query":             {}, // analyst's per-tick SQL pulls — surface via insightlog instead
 	"/api/debug/stream":      {}, // SSE — long-lived, would otherwise pollute the access log
-	"/api/pi_agent/stream":   {}, // SSE — pi-agent activity firehose for Analyst Team tab
-	"/api/pi_agent/recent":   {}, // polled on cold-start by Analyst Team tab
+	"/api/analyst/stream":    {}, // SSE — data analyst activity firehose
+	"/api/analyst/recent":    {}, // polled on cold-start by Data Analyst tab
+	"/api/analyst/status":    {}, // polled by Settings page status banner
 }
 
 func (s *Server) setupMiddleware() {
@@ -174,10 +175,13 @@ func (s *Server) setupRoutes() {
 	s.app.Post("/api/analyst/query", analystQueryHandler(s.deps))
 	s.app.Get("/api/analyst/jobs", analystJobsHandler(s.deps))
 
-	// Pi Agent — live activity feed for the dashboard's "Analyst Team" tab.
-	// /recent is the cold-start payload; /stream is the SSE firehose.
-	s.app.Get("/api/pi_agent/recent", piAgentRecentHandler(s.deps))
-	s.app.Get("/api/pi_agent/stream", piAgentStreamHandler(s.deps))
+	// Data Analyst — live activity feed for the dashboard's Data Analyst tab.
+	// /recent is the cold-start payload; /stream is the SSE firehose; /status
+	// is the runtime metadata the Settings page banner reads.
+	s.app.Get("/api/analyst/recent", analystRecentHandler(s.deps))
+	s.app.Get("/api/analyst/stream", analystStreamHandler(s.deps))
+	s.app.Get("/api/analyst/status", analystStatusHandler(s.deps))
+	s.app.Post("/api/analyst/restart", analystRestartHandler(s.deps))
 
 	// Interrupts Bus — typed proactive events flowing into Gemini Live.
 	s.app.Post("/api/events/interrupt", eventInterruptHandler(s.deps))

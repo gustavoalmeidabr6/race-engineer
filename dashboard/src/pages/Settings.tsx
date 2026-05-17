@@ -101,25 +101,14 @@ const TOOLTIPS: Record<string, ReactNode> = {
       . Stored only on this machine.
     </>
   ),
-  PI_AGENT_MODE: (
+  DA_ENABLED: (
     <>
-      When <code>on</code>, <code>start.sh</code> launches{' '}
-      <code>pi_agent_service.py</code> as a sandboxed Python child process —
-      the only escape hatch is the MCP endpoint at the path below. The pi
-      agent replaces the legacy in-process Strategy Analyst and reacts to
-      driver questions, lap completions, and significant rule-engine events
-      (tire cliff, weather, damage, safety car, …). Restart required after
-      flipping this — the agent runs alongside the Go core, not inside it.
-    </>
-  ),
-  PI_AGENT_MAX_PRIORITY: (
-    <>
-      The pi agent's <code>push_insight</code> tool is capped at this
-      priority server-side, even when its skill or the LLM tries to escalate
-      higher. 3 is the recommended default — keeps the agent from
-      monopolising team radio. Driver-initiated queries with{' '}
-      <code>urgent=true</code> bypass this cap because the driver already
-      asked.
+      When on, telemetry-core spawns the bundled <code>opencode acp</code>{' '}
+      subprocess once per app boot and drives it as the Data Analyst.
+      Triggers are lap-complete, significant rule-engine events, and{' '}
+      <code>POST /api/analyst/query</code>. The agent reaches data via the
+      MCP server at <code>/mcp</code> and writes findings into its
+      self-evolving workspace. Restart required after flipping.
     </>
   ),
 };
@@ -201,8 +190,14 @@ const SECTIONS: SectionDef[] = [
       {
         key: 'TTS_VOICE',
         label: 'TTS voice',
-        help: 'Prebuilt Gemini voice name (e.g. Kore, Puck, Charon, Aoede). Default: Kore.',
-        placeholder: 'Kore',
+        options: [
+          { value: 'Charon', label: 'Charon — deep, measured (default)' },
+          { value: 'Kore', label: 'Kore — neutral, professional' },
+          { value: 'Puck', label: 'Puck — upbeat, bright' },
+          { value: 'Aoede', label: 'Aoede — warm, expressive' },
+          { value: 'Fenrir', label: 'Fenrir — gravelly, commanding' },
+        ],
+        help: 'Prebuilt Gemini voice the engineer speaks with. Used by both the standalone TTS path and Gemini Live. Restart required for Live to pick up a change.',
       },
     ],
   },
@@ -248,80 +243,39 @@ const SECTIONS: SectionDef[] = [
     ],
   },
   {
-    id: 'pi_agent',
-    title: 'Pi Agent',
+    id: 'data_analyst',
+    title: 'Data Analyst',
     description:
-      'Sandboxed background analyst team. Runs as a separate Python process whose only outward channel is the MCP endpoint below. Replaces the legacy in-process Strategy Analyst.',
+      'opencode-backed pit-wall analyst. Runs as a long-lived `opencode acp` subprocess per app boot, drives prompts on lap/event/query triggers, reaches data via the MCP server at /mcp. Replaces the legacy pi-agent.',
     fields: [
       {
-        key: 'PI_AGENT_MODE',
-        label: 'Pi Agent mode',
-        options: [
-          { value: 'off', label: 'Off' },
-          { value: 'on', label: 'On (launch pi_agent_service.py)' },
-        ],
-        help: 'Restart required. Watch the Analyst Team tab for live activity once enabled.',
+        key: 'DA_ENABLED',
+        label: 'Enable Data Analyst',
+        help: 'Off disables the subprocess entirely (no analyst work, no /api/analyst/* routes return useful data). Restart required. Watch the Data Analyst tab for live activity once enabled.',
       },
       {
-        key: 'PI_AGENT_PROVIDER',
+        key: 'DA_WORKSPACE_DIR',
+        label: 'Workspace directory',
+        placeholder: 'leave blank for ~/.race-engineer/da-workspace',
+        help: 'Where the analyst keeps AGENTS.md, .agents/skills/, driver context, and self-evolving learnings/. Empty = default. In the bundled .app this is overridden to the Application Support copy on first run.',
+      },
+      {
+        key: 'DA_PROVIDER',
         label: 'Provider',
-        options: [
-          { value: 'anthropic', label: 'Anthropic (recommended)' },
-          { value: 'gemini', label: 'Gemini' },
-          { value: 'openai', label: 'OpenAI' },
-          { value: 'custom', label: 'Custom (OpenAI-compatible)' },
-        ],
-        help: 'Anthropic is recommended for tool-calling depth. Needs the matching API key in the LLM section above. Pick "Custom" to use any OpenAI chat-completions compatible endpoint (Ollama, vLLM, LiteLLM, OpenRouter, Together, …) — then fill in the Base URL and API key fields below.',
+        placeholder: 'gemini | anthropic | openai',
+        help: 'LLM provider opencode uses. Leave blank to let opencode pick from whatever auth it already has (usually fine if you ran `opencode auth login` once). Needs the matching API key in the LLM section above.',
       },
       {
-        key: 'PI_AGENT_MODEL',
-        label: 'Planner model override',
+        key: 'DA_MODEL',
+        label: 'Model override',
         placeholder: 'leave blank for provider default',
-        help: 'Type the exact model ID for the chosen Pi-Agent provider (e.g. claude-opus-4-7, gpt-4o-mini, gemini-3.1-pro-preview, llama3.1:8b for Ollama). Empty = SDK default. The planner is the cheap orchestrator that picks which specialist to dispatch.',
+        help: 'Exact model ID for the chosen provider (e.g. claude-sonnet-4-6, gpt-4.1-mini, gemini-2.5-pro). Empty = a sensible default per provider.',
       },
       {
-        key: 'PI_AGENT_SPECIALIST_MODEL',
-        label: 'Specialist model override',
-        placeholder: 'leave blank to reuse planner model',
-        help: 'Empty = same as planner. Type the exact model ID your provider accepts. Specialists do the heavy reasoning per persona (tires / brakes / pace / strategy / weather / energy / driving / responder).',
-      },
-      {
-        key: 'PI_AGENT_BASE_URL',
-        label: 'Custom base URL',
-        placeholder: 'http://localhost:11434/v1',
-        help: 'Only used when Provider = Custom. The OpenAI-compatible endpoint your specialist talks to. Examples: http://localhost:11434/v1 (Ollama), http://localhost:8000/v1 (vLLM / LiteLLM), https://openrouter.ai/api/v1 (OpenRouter).',
-      },
-      {
-        key: 'PI_AGENT_API_KEY',
-        label: 'Custom API key',
-        placeholder: '••••',
-        help: 'API key sent to the custom endpoint. Many local servers (Ollama, vLLM) accept any non-empty string and you can leave this blank — a placeholder is sent automatically.',
-      },
-      {
-        key: 'PI_AGENT_MAX_PRIORITY',
-        label: 'Max push_insight priority (1–5)',
-        help: 'Server-side cap on radio messages the agent can push. 3 keeps it polite.',
-      },
-      {
-        key: 'PI_AGENT_MAX_CONCURRENT_RUNS',
-        label: 'Max parallel runs',
-        help: 'Cap on specialist runs in flight at once. Each pulled trigger (query / lap / event) spawns its own task; this stops a slow analysis from starving the queue. 4 is a sane default; bump it if you frequently see triggers backing up.',
-      },
-      {
-        key: 'PI_AGENT_MAX_STEPS',
-        label: 'Max steps per run',
-        help: 'How many LLM round-trips a single specialist run can make before the loop is forced to exit. Each step = one model call (which may issue several tool calls in parallel). 100 leaves a lot of headroom; lower it to enforce terser runs.',
-      },
-      {
-        key: 'PI_AGENT_MCP_PATH',
-        label: 'MCP mount path',
-        placeholder: '/mcp',
-        help: 'HTTP path the Go server mounts the MCP transport on. Match the value the Python child connects to.',
-      },
-      {
-        key: 'PI_AGENT_TRIGGER_TIMEOUT_SEC',
-        label: 'Trigger long-poll timeout (s)',
-        help: '10s default keeps the planner cheap. Lower = snappier dispatch on idle ticks; higher = fewer wakeups.',
+        key: 'DA_HANDSHAKE_TIMEOUT_SEC',
+        label: 'Handshake timeout (s)',
+        placeholder: '90',
+        help: 'How long to wait for opencode `session/new` before giving up. The handshake includes a live MCP tool-list round-trip against /mcp, which competes with other boot traffic — bump to 120–180 on slow machines. initialize is bounded separately at 15s. Allowed range 30–300.',
       },
     ],
   },
@@ -653,11 +607,66 @@ function Section({ section, config, saveKey }: SectionProps) {
             );
           })}
 
+          {section.id === 'data_analyst' && <AnalystRestartControl />}
+
           {sectionHasStatic && (
             <div className="pt-3 border-t border-border text-[11px] text-muted">
               Fields tagged "restart" take effect on next server restart.
             </div>
           )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// AnalystRestartControl posts /api/analyst/restart and shows the outcome
+// inline. Cheap to recover from a failed handshake without bouncing the
+// whole server (handler is in internal/api/analyst_handlers.go).
+function AnalystRestartControl() {
+  const [status, setStatus] = useState<'idle' | 'busy' | 'ok' | 'err'>('idle');
+  const [msg, setMsg] = useState<string>('');
+
+  const onClick = useCallback(async () => {
+    setStatus('busy');
+    setMsg('');
+    try {
+      const r = await fetch('/api/analyst/restart', { method: 'POST' });
+      const body = (await r.json().catch(() => ({}))) as { ok?: boolean; error?: string };
+      if (!r.ok || !body.ok) {
+        setStatus('err');
+        setMsg(body.error || `HTTP ${r.status}`);
+        return;
+      }
+      setStatus('ok');
+      setMsg('opencode subprocess restarted — handshake re-running in background');
+    } catch (e) {
+      setStatus('err');
+      setMsg(e instanceof Error ? e.message : String(e));
+    }
+  }, []);
+
+  return (
+    <div className="pt-3 border-t border-border space-y-2">
+      <div className="flex items-center gap-3">
+        <button
+          type="button"
+          onClick={onClick}
+          disabled={status === 'busy'}
+          className="px-3 py-1.5 bg-bg text-white border border-border rounded-md text-sm hover:border-accent disabled:opacity-50"
+        >
+          {status === 'busy' ? 'Restarting…' : 'Restart Data Analyst'}
+        </button>
+        <div className="text-xs text-muted">
+          Tears down opencode and re-runs the ACP handshake. Use after a
+          timeout shows in the status pill.
+        </div>
+      </div>
+      {msg && (
+        <div
+          className={`text-xs ${status === 'err' ? 'text-red-400' : 'text-emerald-400'}`}
+        >
+          {msg}
         </div>
       )}
     </div>

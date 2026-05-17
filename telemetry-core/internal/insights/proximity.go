@@ -69,10 +69,12 @@ const (
 	proximityRefireSec = 25
 
 	// Top-N cars per side to include in the published event payload.
-	// Five gives the LLM enough spatial context to say "three closing
-	// behind, two slow cars two corners ahead" without blowing the
-	// 1KB DebugData budget.
-	proximityEventTopN = 5
+	// Three gives the LLM enough spatial context ("two closing behind,
+	// one slow car ahead") while keeping the worst-case 6-car payload
+	// comfortably under MaxEventDebugBytes (1 KB) once float32 channels
+	// + threat-label strings are accounted for. Full per-car detail is
+	// fetched separately via the get_nearby_cars tool.
+	proximityEventTopN = 3
 
 	// Cars older than this in the history map (no new samples) are dropped.
 	proximityStaleSec = 5
@@ -657,20 +659,18 @@ func buildTrafficUpdateEvent(state *models.RaceState, ahead, behind, firingAhead
 	}
 }
 
-// nearbyCarToMap serialises a NearbyCar into the DebugData shape. Keys
-// are stable so dashboards / the Live agent can read them positionally.
+// nearbyCarToMap serialises a NearbyCar into the DebugData shape. Kept
+// deliberately lean so top-N=5 on each side fits inside MaxEventDebugBytes
+// (1 KB). The Live agent reaches `get_nearby_cars` (/api/state/nearby_cars)
+// for the full per-car detail (surname, position, speed); this event's
+// payload only carries the spatial-trigger context.
 func nearbyCarToMap(c NearbyCar) map[string]any {
 	return map[string]any{
 		"car_index":   int(c.CarIndex),
-		"driver":      c.DriverName,
-		"position":    int(c.Position),
-		"current_lap": int(c.CurrentLap),
-		"distance_m":  c.DistanceM,
 		"signed_m":    c.SignedM,
 		"closing_mps": c.ClosingMps,
 		"eta_sec":     c.EtaSec,
 		"threat":      c.Threat,
-		"speed_kmh":   int(c.SpeedKmh),
 	}
 }
 

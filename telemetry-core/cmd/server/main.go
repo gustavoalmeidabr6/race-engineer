@@ -12,6 +12,7 @@ import (
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
 
+	"github.com/tusharbhardwaj/race-engineer/telemetry-core/internal/analyst"
 	"github.com/tusharbhardwaj/race-engineer/telemetry-core/internal/api"
 	"github.com/tusharbhardwaj/race-engineer/telemetry-core/internal/audio"
 	"github.com/tusharbhardwaj/race-engineer/telemetry-core/internal/brain"
@@ -210,18 +211,20 @@ func main() {
 	engine.SetReader(store.Reader())
 	engine.SetRoster(store.Roster())
 
-	// Pi-agent triggers are constructed below in section 13. We wire the
-	// engine hooks deferred via a closure so the order of construction
-	// doesn't force section reshuffling.
-	var piTriggers *mcpx.TriggerQueue
+	// Data Analyst triggers are constructed below in section 13. We wire
+	// the engine hooks deferred via a closure so the order of construction
+	// doesn't force section reshuffling. The analyst spawns opencode
+	// asynchronously — until it reports Ready, OnLapComplete /
+	// OnSignificantEvent are no-ops.
+	var dataAnalyst *analyst.Runtime
 	engine.SetLapCompleteHook(func(lap int) {
-		if piTriggers != nil {
-			piTriggers.EnqueueLapComplete(lap)
+		if dataAnalyst != nil {
+			dataAnalyst.OnLapComplete(lap)
 		}
 	})
 	engine.SetSignificantEventHook(func(code, detail string, meta map[string]any) {
-		if piTriggers != nil {
-			piTriggers.EnqueueSignificant(code, detail, meta)
+		if dataAnalyst != nil {
+			dataAnalyst.OnSignificantEvent(code, detail, meta)
 		}
 	})
 
@@ -595,6 +598,7 @@ func main() {
 			agent, aerr := voice.NewLiveAgent(ctx, voice.LiveAgentConfig{
 				APIKey:   cfg.GeminiAPIKey,
 				Model:    cfg.GeminiLiveModel,
+				Voice:    cfg.TTSVoice,
 				SystemMD: intelligence.LoadFileWithFallback(cfg.WorkspaceDir, "soul.md", "SOUL.md", ""),
 				Tools:    voice.DefaultLiveTools(),
 				OnTool:   voice.HTTPToolHandler(apiBase, time.Duration(cfg.GeminiLiveAnalystTimeout)*time.Second),
@@ -636,32 +640,55 @@ func main() {
 		log.Info().Str("voice_mode", cfg.VoiceMode).Msg("voice: Gemini Live factory skipped (ptt_only mode)")
 	}
 
-	// ── 13. Pi Agent — MCP server + trigger queue ───────────────────────
-	// Replaces the old internal Strategy Analyst. The pi agent itself is a
-	// sandboxed Python child process (pi_agent_service.py) launched by
-	// start.sh when PI_AGENT_MODE != "off". It long-polls pull_next_trigger
-	// over MCP and reacts to one of three trigger kinds:
-	//   • TriggerQuery       — /api/analyst/query enqueued a question
-	//   • TriggerLapComplete — the player car crossed start/finish
-	//   • TriggerSignificant — the rule engine fired a significant event
-	// All tool calls (read state, query DuckDB, write observations, push
-	// insights) flow back through the MCP server below.
-	piTriggers = mcpx.NewTriggerQueue(256)
-	piSkills := mcpx.NewSkillRegistry(filepath.Join(cfg.WorkspaceDir, "pi_skills"))
-	piActivity := mcpx.NewActivityHub(256)
+	// ── 13. MCP server (shared by Gemini Live + Data Analyst) ──────────
+	// The MCP surface stays the same — 24 read-only data tools plus the
+	// gated push_insight writer. Both the in-Go Gemini Live agent and the
+	// bundled opencode Data Analyst connect to /mcp.
+	mcpActivity := mcpx.NewActivityHub(256)
 	mcpServer := mcpx.NewServer(&mcpx.Deps{
-		Brain:          raceBrain,
-		Reader:         store.Reader(),
-		InsightLog:     insightLog,
-		Cache:          func() *models.RaceState { return store.Cache().Load() },
-		Triggers:       piTriggers,
-		Skills:         piSkills,
-		Activity:       piActivity,
-		APIBase:        "http://localhost:" + cfg.APIPort,
-		MaxPriority:    cfg.PiAgentMaxPriority,
-		TriggerTimeout: time.Duration(cfg.PiAgentTriggerTimeoutSec) * time.Second,
+		Brain:       raceBrain,
+		Reader:      store.Reader(),
+		InsightLog:  insightLog,
+		Cache:       func() *models.RaceState { return store.Cache().Load() },
+		Activity:    mcpActivity,
+		APIBase:     "http://localhost:" + cfg.APIPort,
+		MaxPriority: 3,
 	})
-	log.Info().Str("mode", cfg.PiAgentMode).Str("provider", cfg.PiAgentProvider).Msg("Pi agent MCP server ready")
+	log.Info().Msg("MCP server ready")
+
+	// ── 13b. Data Analyst — opencode (ACP) ──────────────────────────────
+	// Long-lived `opencode acp` subprocess. Drives prompts on lap-complete
+	// / significant-event / dashboard query triggers, reaches back through
+	// MCP for telemetry data. Failure to start disables the analyst but
+	// does not block the server (rule-engine path still feeds the radio).
+	switch {
+	case !cfg.DAEnabled:
+		log.Info().Msg("Data Analyst disabled (DA_ENABLED=false)")
+	case cfg.DAProvider == "":
+		log.Warn().Msg("Data Analyst skipped — DA_PROVIDER is empty. Set it (gemini|anthropic|openai) in Settings and ensure opencode is authenticated for that provider (`opencode auth login`).")
+	default:
+		workspaceDir, werr := analyst.ResolveDefaultWorkspace(cfg.DAWorkspaceDir)
+		if werr != nil {
+			log.Warn().Err(werr).Msg("data analyst: workspace path resolve failed; analyst disabled")
+			break
+		}
+		da, derr := analyst.Start(ctx, analyst.Options{
+			Binary:              os.Getenv("OPENCODE_BIN"),
+			Workspace:           workspaceDir,
+			MCPURL:              "http://localhost:" + cfg.APIPort + "/mcp",
+			Provider:            cfg.DAProvider,
+			Model:               cfg.DAModel,
+			HandshakeTimeoutSec: cfg.DAHandshakeTimeoutSec,
+			Logger:              log.With().Str("comp", "analyst").Logger(),
+		})
+		if derr != nil {
+			log.Warn().Err(derr).Msg("data analyst: pre-flight failed; analyst disabled")
+		} else {
+			dataAnalyst = da
+			defer dataAnalyst.Stop()
+			log.Info().Str("workspace", workspaceDir).Str("provider", cfg.DAProvider).Msg("Data Analyst boot queued (handshake runs after API is up)")
+		}
+	}
 
 	// ── 14. Track geometry registry ─────────────────────────────────────
 	// (Now loaded earlier, before the plan ticker which depends on the
@@ -678,8 +705,7 @@ func main() {
 		PacketsRx:      ingester.PacketsReceived,
 		Workspace:      ws,
 		Gate:           gate,
-		PiAgent:        piTriggers,
-		PiActivity:     piActivity,
+		Analyst:        dataAnalyst,
 		RawInsightChan: rawInsightChan,
 		Hub:            wsHub,
 		VoiceClient:    voiceClient,
@@ -695,7 +721,7 @@ func main() {
 		Plan:           planStore,
 	}
 	server := api.NewServer(cfg.APIPort, deps)
-	mcpServer.Mount(server.App(), cfg.PiAgentMCPPath)
+	mcpServer.Mount(server.App(), "/mcp")
 	wg.Add(1)
 	go func() {
 		defer wg.Done()

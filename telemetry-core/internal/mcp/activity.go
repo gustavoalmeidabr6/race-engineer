@@ -2,7 +2,6 @@ package mcp
 
 import (
 	"context"
-	"encoding/json"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -11,18 +10,19 @@ import (
 	mcpserver "github.com/mark3labs/mcp-go/server"
 )
 
-// ActivityKind enumerates the things the dashboard's "Analyst Team" tab cares
-// about. Tool calls dominate; trigger arrivals and the agent's own writes are
-// surfaced as their own kinds so the UI can highlight them.
+// ActivityKind enumerates the MCP traffic surfaced through the in-process
+// hub. Today this is consumed by callers that want a generic "what tool was
+// invoked over MCP?" stream (e.g. the dashboard's Live Debug tab).
+//
+// The pi-agent-specific kinds (trigger / observation / query_answer) were
+// removed when the analyst moved to opencode + ACP. The Data Analyst's own
+// activity feed lives in internal/analyst.
 type ActivityKind string
 
 const (
 	ActivityToolCall      ActivityKind = "tool_call"
 	ActivityToolResult    ActivityKind = "tool_result"
-	ActivityTrigger       ActivityKind = "trigger"
-	ActivityObservation   ActivityKind = "observation"
 	ActivityInsightPushed ActivityKind = "insight_pushed"
-	ActivityQueryAnswer   ActivityKind = "query_answer"
 	ActivityError         ActivityKind = "error"
 )
 
@@ -180,53 +180,7 @@ func installActivityHooks(hooks *mcpserver.Hooks, hub *ActivityHub) {
 		}
 		args := req.GetArguments()
 		runID, persona := extractRunMeta(args)
-		// Special-case some tools so the timeline is more readable than a
-		// raw JSON blob.
-		switch req.Params.Name {
-		case "pull_next_trigger":
-			if t, ok := decodeTrigger(text); ok {
-				hub.Publish(Activity{
-					Kind:       ActivityTrigger,
-					Summary:    triggerSummary(t),
-					DurationMs: dur,
-					Meta: map[string]any{
-						"kind":          t.Kind,
-						"job_id":        t.JobID,
-						"event_code":    t.EventCode,
-						"lap":           t.Lap,
-						"context_topic": t.ContextTopic,
-						"urgent":        t.Urgent,
-					},
-				})
-				return
-			}
-		case "submit_query_answer":
-			hub.Publish(Activity{
-				Kind:    ActivityQueryAnswer,
-				RunID:   runID,
-				Persona: persona,
-				Summary: trimText(stringField(args, "answer"), 200),
-				Meta: map[string]any{
-					"job_id": stringField(args, "job_id"),
-					"urgent": args["urgent"],
-				},
-				DurationMs: dur,
-			})
-			return
-		case "write_observation":
-			hub.Publish(Activity{
-				Kind:    ActivityObservation,
-				RunID:   runID,
-				Persona: persona,
-				Summary: trimText(stringField(args, "summary"), 200),
-				Meta: map[string]any{
-					"topic":      "pi_agent." + stringField(args, "topic"),
-					"hypothesis": args["hypothesis"],
-				},
-				DurationMs: dur,
-			})
-			return
-		case "push_insight":
+		if req.Params.Name == "push_insight" {
 			hub.Publish(Activity{
 				Kind:    ActivityInsightPushed,
 				RunID:   runID,
@@ -287,8 +241,6 @@ func summariseCall(tool string, args map[string]any) string {
 	switch tool {
 	case "query_sql":
 		return trimText(stringField(args, "sql"), 140)
-	case "get_skill":
-		return "skill=" + stringField(args, "name")
 	case "set_corner_reminder":
 		msg := stringField(args, "message")
 		corner := stringField(args, "corner_id")
@@ -328,52 +280,3 @@ func stringField(m map[string]any, k string) string {
 	return ""
 }
 
-func decodeTrigger(text string) (Trigger, bool) {
-	var t Trigger
-	if err := json.Unmarshal([]byte(text), &t); err != nil {
-		return Trigger{}, false
-	}
-	if t.Kind == "" || t.Kind == "none" {
-		return Trigger{}, false
-	}
-	return t, true
-}
-
-func triggerSummary(t Trigger) string {
-	switch t.Kind {
-	case TriggerQuery:
-		return "Q: " + trimText(t.Question, 160)
-	case TriggerLapComplete:
-		return "lap " + itoa(t.Lap) + " complete"
-	case TriggerSignificant:
-		s := t.EventCode
-		if t.EventDetail != "" {
-			s += " — " + t.EventDetail
-		}
-		return trimText(s, 200)
-	}
-	return string(t.Kind)
-}
-
-func itoa(n int) string {
-	// avoid strconv import for one helper
-	if n == 0 {
-		return "0"
-	}
-	neg := n < 0
-	if neg {
-		n = -n
-	}
-	var buf [20]byte
-	i := len(buf)
-	for n > 0 {
-		i--
-		buf[i] = byte('0' + n%10)
-		n /= 10
-	}
-	if neg {
-		i--
-		buf[i] = '-'
-	}
-	return string(buf[i:])
-}

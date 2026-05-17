@@ -99,14 +99,12 @@ var keyRegistry = map[string]configKey{
 	// the typed write).
 	"CORNER_REMINDER_DEFAULT_LOOKAHEAD_SEC": {Section: "coaching", Kind: kindStatic, Type: "string"},
 
-	// --- Pi Agent ---
-	"PI_AGENT_MODE":                {Section: "pi_agent", Kind: kindStatic, Type: "string"},
-	"PI_AGENT_PROVIDER":            {Section: "pi_agent", Kind: kindStatic, Type: "string"},
-	"PI_AGENT_MODEL":               {Section: "pi_agent", Kind: kindStatic, Type: "string"},
-	"PI_AGENT_SPECIALIST_MODEL":    {Section: "pi_agent", Kind: kindStatic, Type: "string"},
-	"PI_AGENT_MAX_PRIORITY":        {Section: "pi_agent", Kind: kindStatic, Type: "int"},
-	"PI_AGENT_MCP_PATH":            {Section: "pi_agent", Kind: kindStatic, Type: "string"},
-	"PI_AGENT_TRIGGER_TIMEOUT_SEC": {Section: "pi_agent", Kind: kindStatic, Type: "int"},
+	// --- Data Analyst ---
+	"DA_ENABLED":               {Section: "data_analyst", Kind: kindStatic, Type: "bool"},
+	"DA_WORKSPACE_DIR":         {Section: "data_analyst", Kind: kindStatic, Type: "string"},
+	"DA_PROVIDER":              {Section: "data_analyst", Kind: kindStatic, Type: "string"},
+	"DA_MODEL":                 {Section: "data_analyst", Kind: kindStatic, Type: "string"},
+	"DA_HANDSHAKE_TIMEOUT_SEC": {Section: "data_analyst", Kind: kindStatic, Type: "int"},
 
 	// --- Transcript / Logging ---
 	"LOG_LEVEL":                     {Section: "logging", Kind: kindStatic, Type: "string"},
@@ -297,13 +295,11 @@ func snapshotKnownKeys(deps *Deps, fileCfg map[string]any) map[string]any {
 		"TALK_LEVEL":                    int(cfg.TalkLevel.Load()),
 		"VERBOSITY":                     int(cfg.Verbosity.Load()),
 		"TELEMETRY_MODE":                ifMock(cfg.MockMode.Load()),
-		"PI_AGENT_MODE":                 cfg.PiAgentMode,
-		"PI_AGENT_PROVIDER":             cfg.PiAgentProvider,
-		"PI_AGENT_MODEL":                cfg.PiAgentModel,
-		"PI_AGENT_SPECIALIST_MODEL":     cfg.PiAgentSpecialistModel,
-		"PI_AGENT_MAX_PRIORITY":         cfg.PiAgentMaxPriority,
-		"PI_AGENT_MCP_PATH":             cfg.PiAgentMCPPath,
-		"PI_AGENT_TRIGGER_TIMEOUT_SEC":  cfg.PiAgentTriggerTimeoutSec,
+		"DA_ENABLED":               cfg.DAEnabled,
+		"DA_WORKSPACE_DIR":         cfg.DAWorkspaceDir,
+		"DA_PROVIDER":              cfg.DAProvider,
+		"DA_MODEL":                 cfg.DAModel,
+		"DA_HANDSHAKE_TIMEOUT_SEC": cfg.DAHandshakeTimeoutSec,
 		"LOG_LEVEL":                     cfg.LogLevel,
 		"TRANSCRIPT_PROMPT_LINES":       cfg.TranscriptPromptLines,
 		"TRANSCRIPT_TOOL_LIMIT":         cfg.TranscriptToolLimit,

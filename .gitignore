@@ -99,3 +99,6 @@ node_modules/
 
 # In-repo git worktrees (created via `git worktree add .worktrees/<branch>`)
 .worktrees/
+
+# Data Analyst (opencode bundle)
+desktop/RaceEngineer/bin/opencode

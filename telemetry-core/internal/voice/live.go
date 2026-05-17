@@ -32,6 +32,15 @@ const LiveAudioInputRate = 16000
 // before forwarding to the browser <audio> element.
 const LiveAudioOutputRate = 24000
 
+// ErrLiveGoAway is returned by Run() when the Gemini Live server sends a
+// GoAway frame signalling that the session is about to be retired (it has
+// a server-imposed max duration of ~10 min for the audio profile). The
+// supervisor in api/live_ws.go treats this as an expected, in-band session
+// rotation — it reconnects without burning the give-up window. Conversation
+// history survives the rotation via SessionResumption; see LiveAgent's
+// resumeHandle.
+var ErrLiveGoAway = errors.New("live: server GoAway, rotating session")
+
 // ToolHandler is the function shape the Live agent calls back to handle
 // a tool invocation. The agent itself stays decoupled from the REST
 // surface: cmd/server passes in a handler that knows how to translate
@@ -95,6 +104,7 @@ type EventBundler func(ctx context.Context, targetEventID string, floor int) (*L
 type LiveAgentConfig struct {
 	APIKey    string      // required; from cfg.GeminiAPIKey
 	Model     string      // optional; defaults to DefaultLiveModel
+	Voice     string      // optional; prebuilt Gemini voice name (Kore, Puck, Charon, Aoede, ...). Empty = SDK default.
 	SystemMD  string      // optional; appended to the system instruction at session start
 	InitBrain string      // optional; appended after SystemMD, in a "## Initial Race Brain" section
 	OnTool    ToolHandler // required; called for every server-issued tool_call
@@ -235,6 +245,14 @@ type LiveAgent struct {
 	// operation (driver presses PTT while a brain event lands and a
 	// tool response is in flight) and crash the whole agent.
 	sendMu sync.Mutex
+
+	// resumeHandle is the latest session-resumption token the server has
+	// emitted on this agent. Captured in handleServerMessage when
+	// SessionResumptionUpdate.Resumable is true and replayed on the next
+	// Run()'s Connect so the rotated session continues the prior
+	// conversation history instead of starting cold. Survives across
+	// Run() calls (supervisor reconnects after GoAway / network blips).
+	resumeHandle atomic.Pointer[string]
 }
 
 // sendClientContent serialises the SDK's write path so concurrent pumps
@@ -364,6 +382,30 @@ func (a *LiveAgent) Run(ctx context.Context) error {
 		// piggybacked on the existing audio path.
 		InputAudioTranscription:  &genai.AudioTranscriptionConfig{},
 		OutputAudioTranscription: &genai.AudioTranscriptionConfig{},
+
+		// Opt into server-managed session resumption. Without this the
+		// server won't emit SessionResumptionUpdate frames and we have
+		// no way to continue the conversation when the ~10-minute
+		// max-duration GoAway forces a fresh socket. With it, we pass
+		// the latest handle back on every reconnect and the new session
+		// resumes prior history transparently.
+		SessionResumption: &genai.SessionResumptionConfig{},
+	}
+	if h := a.resumeHandle.Load(); h != nil && *h != "" {
+		cfg.SessionResumption.Handle = *h
+	}
+	resuming := cfg.SessionResumption.Handle != ""
+	// Voice override — empty = SDK picks a default. Anything else routes
+	// through the same PrebuiltVoiceConfig path the standalone TTS uses
+	// (Kore, Puck, Charon, Aoede, Fenrir, …).
+	if v := a.cfg.Voice; v != "" {
+		cfg.SpeechConfig = &genai.SpeechConfig{
+			VoiceConfig: &genai.VoiceConfig{
+				PrebuiltVoiceConfig: &genai.PrebuiltVoiceConfig{
+					VoiceName: v,
+				},
+			},
+		}
 	}
 
 	session, err := a.client.Live.Connect(ctx, a.cfg.Model, cfg)
@@ -382,7 +424,13 @@ func (a *LiveAgent) Run(ctx context.Context) error {
 	// engineer speech in the current F1 session). The synthetic turn
 	// uses the same SendClientContent + turn_complete pattern as the
 	// brain-event pump so the model treats it as a directive to speak.
-	if a.cfg.RadioCheckPrompt != nil {
+	// Skipped on resume — the server already has the conversation
+	// history, and re-greeting "radio check, do you copy?" every ~10
+	// minutes when the session rotates would be jarring.
+	if resuming {
+		log.Info().Msg("live: resumed prior session via handle; skipping radio check")
+	}
+	if !resuming && a.cfg.RadioCheckPrompt != nil {
 		if prompt := a.cfg.RadioCheckPrompt(); prompt != "" {
 			if err := a.sendClientContent(session, genai.LiveClientContentInput{
 				Turns: []*genai.Content{{
@@ -532,10 +580,25 @@ func (a *LiveAgent) handleServerMessage(ctx context.Context, session *genai.Sess
 	if msg.ToolCall != nil {
 		a.handleToolCall(ctx, session, msg.ToolCall)
 	}
+	if msg.SessionResumptionUpdate != nil && msg.SessionResumptionUpdate.Resumable {
+		if h := msg.SessionResumptionUpdate.NewHandle; h != "" {
+			prev := a.resumeHandle.Load()
+			a.resumeHandle.Store(&h)
+			if prev == nil || *prev != h {
+				log.Debug().Msg("live: captured new session resumption handle")
+			}
+		}
+	}
 	if msg.GoAway != nil {
-		log.Warn().Msg("Live server signalled GoAway; session will reconnect")
-		// Returning nil here lets the next Receive() error out cleanly
-		// when the server actually closes. Caller-driven reconnect.
+		// Rotate proactively while the socket is still healthy. Returning
+		// ErrLiveGoAway propagates up pumpServer → errCh → Run(); the
+		// supervisor in api/live_ws.go matches on this sentinel, resets
+		// the give-up window, and Connects again. The new session resumes
+		// prior conversation history via the handle we captured above.
+		// Waiting for the server to force-close (the old behaviour) ends
+		// in a 1008 policy violation that knocks Live out for minutes.
+		log.Warn().Dur("time_left", msg.GoAway.TimeLeft).Msg("Live server signalled GoAway; rotating session")
+		return ErrLiveGoAway
 	}
 	return nil
 }

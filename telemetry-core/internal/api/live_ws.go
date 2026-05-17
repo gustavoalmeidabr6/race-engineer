@@ -5,6 +5,7 @@ import (
 	cryptorand "crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"strings"
 	"sync"
 	"time"
@@ -25,8 +26,12 @@ const (
 	liveReconnectMaxBackoff     = 8 * time.Second
 	// Give up after sustained failure so a misconfigured API key or
 	// permanent Gemini outage surfaces to the dashboard instead of
-	// looping forever.
-	liveReconnectGiveUpAfter = 60 * time.Second
+	// looping forever. Five minutes gives the laptop's wifi a real
+	// chance to recover from a network blip mid-race without the
+	// driver having to do anything. Expected GoAway rotations don't
+	// count against this budget — see voice.ErrLiveGoAway handling
+	// in the supervisor loop.
+	liveReconnectGiveUpAfter = 5 * time.Minute
 )
 
 // LiveAgentRunner is the contract live_ws needs from a Gemini Live agent.
@@ -266,6 +271,26 @@ func liveWSHandler(deps *LiveDeps) func(*websocket.Conn) {
 				if !shouldAutoReconnectLive(runErr) {
 					agentDone <- runErr
 					return
+				}
+
+				// Expected session rotation — the server sent GoAway when
+				// the ~10-min max session duration approached, and the
+				// agent exited cleanly while the socket was still healthy.
+				// Reset the give-up window and reconnect immediately;
+				// the new session resumes prior history via the handle
+				// the agent captured. No status frame: rotation is
+				// invisible to the dashboard.
+				if errors.Is(runErr, voice.ErrLiveGoAway) {
+					log.Info().Msg("live: rotating session after GoAway")
+					firstFailure = time.Time{}
+					backoff = liveReconnectInitialBackoff
+					select {
+					case <-ctx.Done():
+						agentDone <- runErr
+						return
+					case <-time.After(liveReconnectInitialBackoff):
+					}
+					continue
 				}
 
 				if firstFailure.IsZero() {

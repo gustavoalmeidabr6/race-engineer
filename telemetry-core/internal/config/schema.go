@@ -26,8 +26,8 @@ const (
 	GroupCoaching   = "coaching"
 	GroupLogging    = "logging"
 	GroupServer     = "server"
-	GroupPiAgent    = "pi_agent"
-	GroupAudio      = "audio"
+	GroupDataAnalyst = "data_analyst"
+	GroupAudio       = "audio"
 )
 
 // Field describes one persistable config key.  Default is the literal value
@@ -86,7 +86,7 @@ var Schema = []Field{
 	{Key: "RESEMBLE_API_KEY", Kind: KindString, Secret: true, Group: GroupLLM, Help: "Resemble.ai voice cloning API key (optional)"},
 
 	// --- Voice ---
-	{Key: "TTS_VOICE", Kind: KindString, Default: "", Group: GroupVoice, Help: "Prebuilt Gemini voice (Kore, Puck, Charon, Aoede, ...)"},
+	{Key: "TTS_VOICE", Kind: KindString, Default: "Charon", Group: GroupVoice, Help: "Prebuilt Gemini voice (Kore, Puck, Charon, Aoede, ...). Used by both the standalone TTS path and Gemini Live."},
 	{Key: "VOICE_MODE", Kind: KindString, Default: "live_only", Group: GroupVoice, Help: "live_only | ptt_only | both — which input path runs at boot"},
 	// Legacy Python voice_service.py knobs. The Go core no longer reads
 	// them but they're seeded into the JSON file so the Python service
@@ -122,23 +122,19 @@ var Schema = []Field{
 	{Key: "VERBOSITY", Kind: KindInt, Default: 5, Live: true, Group: GroupCoaching, Help: "Engineer response detail 1 (terse) to 10 (detailed)"},
 	{Key: "CORNER_REMINDER_DEFAULT_LOOKAHEAD_SEC", Kind: KindFloat, Default: 3.0, Group: GroupCoaching, Help: "Default lookahead seconds when set_corner_reminder omits lookahead_seconds"},
 
-	// --- Pi Agent (sandboxed background data-analyst team) ---
-	// Replaces the old Strategy Analyst. The Go side hosts an MCP server at
-	// PI_AGENT_MCP_PATH; pi_agent_service.py is a Python child process whose
-	// only outward connection is that MCP endpoint. It is event-driven only
-	// (no background ticker) — triggered by /api/analyst/query, lap completion,
-	// or a "significant change" event from the insights engine.
-	{Key: "PI_AGENT_MODE", Kind: KindString, Default: "on", Group: GroupPiAgent, Help: "off | on — when on, start.sh launches pi_agent_service.py and /api/analyst/query routes to the pi-agent trigger queue"},
-	{Key: "PI_AGENT_PROVIDER", Kind: KindString, Default: "gemini", Group: GroupPiAgent, Help: "anthropic | gemini | openai | custom — LLM provider for pi agent's planner + specialists. 'custom' speaks the OpenAI chat-completions protocol and uses PI_AGENT_BASE_URL + PI_AGENT_API_KEY (Ollama, vLLM, LiteLLM, OpenRouter, Together, etc.)."},
-	{Key: "PI_AGENT_MODEL", Kind: KindString, Default: "gemini-3.1-flash-lite", Group: GroupPiAgent, Help: "Override model for pi agent planner (empty = provider default)"},
-	{Key: "PI_AGENT_SPECIALIST_MODEL", Kind: KindString, Default: "gemini-3.1-flash-lite", Group: GroupPiAgent, Help: "Override model for pi agent specialist sub-loops (empty = same as planner)"},
-	{Key: "PI_AGENT_BASE_URL", Kind: KindString, Default: "", Group: GroupPiAgent, Help: "Base URL for the OpenAI-compatible API when PI_AGENT_PROVIDER=custom (e.g. http://localhost:11434/v1 for Ollama, https://openrouter.ai/api/v1)."},
-	{Key: "PI_AGENT_API_KEY", Kind: KindString, Secret: true, Group: GroupPiAgent, Help: "API key for the custom provider (PI_AGENT_PROVIDER=custom). Many local servers accept any non-empty string."},
-	{Key: "PI_AGENT_MAX_PRIORITY", Kind: KindInt, Default: 3, Group: GroupPiAgent, Help: "Cap on push_insight priority (1-5). Higher writes are rejected by the MCP layer."},
-	{Key: "PI_AGENT_MCP_PATH", Kind: KindString, Default: "/mcp", Group: GroupPiAgent, Help: "HTTP path the MCP server is mounted on"},
-	{Key: "PI_AGENT_TRIGGER_TIMEOUT_SEC", Kind: KindInt, Default: 10, Group: GroupPiAgent, Help: "Long-poll timeout (s) for pull_next_trigger before returning empty"},
-	{Key: "PI_AGENT_MAX_CONCURRENT_RUNS", Kind: KindInt, Default: 4, Group: GroupPiAgent, Help: "Cap on parallel specialist runs. The planner spawns one asyncio task per pulled trigger and bounds them with a semaphore so a slow run can't starve the queue."},
-	{Key: "PI_AGENT_MAX_STEPS", Kind: KindInt, Default: 100, Group: GroupPiAgent, Help: "Max LLM round-trips per specialist run. Each step = one LLM call (which may include several tool calls). 100 is generous; raise it if you see '(max steps reached)' in the activity feed."},
+	// --- Data Analyst (opencode-backed pit-wall analyst) ---
+	// Replaces the old hand-rolled pi-agent. The Go server launches
+	// `opencode acp` once per app lifetime as a long-lived child process
+	// and drives it via JSON-RPC 2.0 over stdin/stdout (Agent Client
+	// Protocol). The agent reaches back through MCP at the same
+	// /mcp endpoint Gemini Live uses, picking up 24 read-only data tools.
+	// MCP path is fixed at /mcp (no separate knob — the analyst writes it
+	// into opencode.json at session start).
+	{Key: "DA_ENABLED", Kind: KindBool, Default: true, Group: GroupDataAnalyst, Help: "Run the Data Analyst on lap/event/query triggers. Auto-disables if the opencode binary cannot be located or fails to start."},
+	{Key: "DA_WORKSPACE_DIR", Kind: KindString, Default: "", Group: GroupDataAnalyst, Help: "Path to the analyst workspace (AGENTS.md, skills, learnings). Empty = ~/.race-engineer/da-workspace (or the app-support equivalent in the bundled .app)."},
+	{Key: "DA_PROVIDER", Kind: KindString, Default: "gemini", Group: GroupDataAnalyst, Help: "LLM provider for the analyst (gemini | anthropic | openai). Empty = let the first-run wizard / opencode auth state decide."},
+	{Key: "DA_MODEL", Kind: KindString, Default: "gemini-3.1-flash-lite", Group: GroupDataAnalyst, Help: "Override model name for the analyst. Empty = provider default."},
+	{Key: "DA_HANDSHAKE_TIMEOUT_SEC", Kind: KindInt, Default: 90, Group: GroupDataAnalyst, Help: "Per-call timeout for the opencode ACP session/new step (seconds, 30-300). Higher tolerates a slow /mcp tool-list under boot load. initialize is bounded separately at 15s."},
 
 	// --- Transcript hub ---
 	{Key: "TRANSCRIPT_PROMPT_LINES", Kind: KindInt, Default: 25, Group: GroupLogging, Help: "Recent transcript events injected into LLM prompts"},

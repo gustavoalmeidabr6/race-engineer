@@ -28,7 +28,6 @@ cleanup() {
     pkill -TERM -f "dashboard/node_modules/.bin/vite" 2>/dev/null || true
     pkill -TERM -f "voice_service.py" 2>/dev/null || true
     pkill -TERM -f "gemini_live_service.py" 2>/dev/null || true
-    pkill -TERM -f "pi_agent_service.py" 2>/dev/null || true
     # Kill any direct children of this script (concurrently, npm wrappers, …).
     pkill -TERM -P $$ 2>/dev/null || true
     # Force-kill survivors after a short grace period.
@@ -37,7 +36,6 @@ cleanup() {
     pkill -KILL -f "dashboard/node_modules/.bin/vite" 2>/dev/null || true
     pkill -KILL -f "voice_service.py" 2>/dev/null || true
     pkill -KILL -f "gemini_live_service.py" 2>/dev/null || true
-    pkill -KILL -f "pi_agent_service.py" 2>/dev/null || true
     pkill -KILL -P $$ 2>/dev/null || true
     exit $rc
 }
@@ -72,11 +70,10 @@ fi
 # ── Hydrate env from ~/.race-engineer/config.json ────────────────────────
 # The Go core auto-seeds this file with all schema defaults and the
 # Settings dashboard persists changes there. start.sh used to read mode
-# gates (PI_AGENT_MODE, VOICE_MODE, …) from the shell env only, so a
-# value set via the dashboard never reached the launcher (e.g. PI-AGENT
-# child never started even though the dashboard showed "mode on").
-# This block mirrors python/race_config.py's _hydrate_environ: explicit
-# env wins, JSON fills the gaps.
+# gates (VOICE_MODE, DA_ENABLED, …) from the shell env only, so a value
+# set via the dashboard never reached the launcher. This block mirrors
+# python/race_config.py's _hydrate_environ: explicit env wins, JSON fills
+# the gaps.
 CONFIG_JSON="${HOME}/.race-engineer/config.json"
 if [ -f "$CONFIG_JSON" ] && command -v python3 >/dev/null 2>&1; then
     while IFS='=' read -r k v; do
@@ -185,27 +182,10 @@ if [ "$NEED_GEMINI_DEPS" = "1" ]; then
     touch venv/.gemini_live_installed
 fi
 
-# Pi-agent deps (mcp + LLM SDK). Lazy install on first run with PI_AGENT_MODE
-# set to anything other than "off" / empty. The marker is per-provider so
-# switching PI_AGENT_PROVIDER between runs installs the new SDK instead of
-# silently reusing the previously-installed one.
-PI_AGENT_MODE="${PI_AGENT_MODE:-off}"
-PI_AGENT_PROVIDER="${PI_AGENT_PROVIDER:-anthropic}"
-PI_AGENT_INSTALL_MARKER="venv/.pi_agent_installed_${PI_AGENT_PROVIDER}"
-if [ "$PI_AGENT_MODE" != "off" ] && [ -n "$PI_AGENT_MODE" ] && [ ! -f "$PI_AGENT_INSTALL_MARKER" ]; then
-    echo "Installing pi-agent deps (mcp + provider SDK for $PI_AGENT_PROVIDER)..."
-    source venv/bin/activate
-    pip install -q "mcp>=1.0"
-    case "$PI_AGENT_PROVIDER" in
-        anthropic|claude) pip install -q anthropic ;;
-        gemini)           pip install -q google-genai ;;
-        # "custom" speaks the OpenAI chat-completions protocol (Ollama,
-        # vLLM, LiteLLM, OpenRouter, Together, …) — same SDK.
-        openai|custom)    pip install -q openai ;;
-    esac
-    deactivate
-    touch "$PI_AGENT_INSTALL_MARKER"
-fi
+# Data Analyst (opencode) runs inside telemetry-core via the bundled
+# `opencode acp` binary. No Python deps to install here — install opencode
+# yourself if you want the analyst enabled (brew install sst/opencode/opencode)
+# and the Go side will spawn it when DA_ENABLED=true.
 
 # ── Pre-launch cleanup ───────────────────────────────────────────────────
 # Kill any orphans from a previous run BEFORE we build/launch. The
@@ -221,13 +201,11 @@ pkill -TERM -f "workspace/bin/telemetry-core" 2>/dev/null || true
 pkill -TERM -f "dashboard/node_modules/.bin/vite" 2>/dev/null || true
 pkill -TERM -f "voice_service.py" 2>/dev/null || true
 pkill -TERM -f "gemini_live_service.py" 2>/dev/null || true
-pkill -TERM -f "pi_agent_service.py" 2>/dev/null || true
 sleep 0.5
 pkill -KILL -f "workspace/bin/telemetry-core" 2>/dev/null || true
 pkill -KILL -f "dashboard/node_modules/.bin/vite" 2>/dev/null || true
 pkill -KILL -f "voice_service.py" 2>/dev/null || true
 pkill -KILL -f "gemini_live_service.py" 2>/dev/null || true
-pkill -KILL -f "pi_agent_service.py" 2>/dev/null || true
 
 # Belt-and-suspenders: anything else still bound to :8081 / :8000 / :8092
 # (e.g. the desktop Wails .app's embedded telemetry-core under a different
@@ -314,17 +292,6 @@ if [ "$LIVE_PATH_ENABLED" = "true" ] && [ "${GEMINI_LIVE_PYTHON_BACKEND:-false}"
     echo "Gemini Live PYTHON backend ENABLED (legacy). Go in-process Live will stand down."
 elif [ "$LIVE_PATH_ENABLED" = "true" ]; then
     echo "Gemini Live ENABLED via Go in-process agent at /api/voice/live."
-fi
-
-if [ "$PI_AGENT_MODE" != "off" ] && [ -n "$PI_AGENT_MODE" ]; then
-    # Sandboxed background data-analyst team. Connects to the Go server's
-    # MCP endpoint (default /mcp) and reacts to query / lap_complete /
-    # significant_event triggers. No shell, no arbitrary HTTP — see
-    # tests/test_pi_agent_sandbox.py for the enforced banned-imports list.
-    PROCS+=("source venv/bin/activate && exec env PYTHONUNBUFFERED=1 python pi_agent_service.py")
-    NAMES+=("PI-AGENT")
-    COLORS+=("magenta")
-    echo "Pi agent ENABLED (mode=$PI_AGENT_MODE provider=$PI_AGENT_PROVIDER)."
 fi
 
 NAMES_CSV=$(IFS=, ; echo "${NAMES[*]}")

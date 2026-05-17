@@ -7,23 +7,21 @@ import (
 	"strings"
 
 	"github.com/mark3labs/mcp-go/mcp"
-	"github.com/rs/zerolog/log"
 
 	"github.com/tusharbhardwaj/race-engineer/telemetry-core/internal/brain"
 )
 
-// registerTools wires the full pi-agent tool surface onto the MCP server.
-// Tools are grouped by category in the source for readability; each tool's
-// description block is what the LLM sees when picking what to call.
+// registerTools wires the full MCP tool surface (used by both Gemini Live
+// and the bundled opencode Data Analyst). Read-only data tools dominate;
+// the only writer is push_insight, which lands on the same /api/strategy
+// fanout the rule engine writes to.
 func (s *Server) registerTools() {
 	s.registerStateTools()
 	s.registerLapTools()
 	s.registerDBTools()
 	s.registerInsightTools()
 	s.registerTranscriptTools()
-	s.registerTriggerTools()
 	s.registerWriteTools()
-	s.registerSkillTools()
 }
 
 // ── 1. Read race state ──────────────────────────────────────────────────────
@@ -449,9 +447,9 @@ func (s *Server) registerInsightTools() {
 	)
 
 	s.mcp.AddTool(
-		mcp.NewTool("recent_pi_observations",
-			mcp.WithDescription("Recent observations the pi agent itself wrote (filtered by topic prefix). Critical for self-deduplication: read this before pushing a new insight."),
-			mcp.WithString("topic_prefix", mcp.Description("Filter prefix; default 'pi_agent.' (everything the pi agent has written).")),
+		mcp.NewTool("recent_analyst_observations",
+			mcp.WithDescription("Recent observations written by the Data Analyst (filtered by topic prefix). Read this before pushing a new insight to avoid restating yourself or contradicting a more recent finding."),
+			mcp.WithString("topic_prefix", mcp.Description("Filter prefix; default 'analyst.' (everything the analyst has written).")),
 			mcp.WithNumber("limit", mcp.Description("Max items per topic (default 5).")),
 		),
 		func(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -459,7 +457,7 @@ func (s *Server) registerInsightTools() {
 				return errResult(fmt.Errorf("brain not configured")), nil
 			}
 			args := req.GetArguments()
-			prefix := "pi_agent."
+			prefix := brain.AnalystTopicPrefix
 			if v, ok := args["topic_prefix"].(string); ok && v != "" {
 				prefix = v
 			}
@@ -542,149 +540,22 @@ func (s *Server) registerTranscriptTools() {
 	)
 }
 
-// ── 5. Trigger queue (the heart of the event-driven model) ──────────────────
-
-func (s *Server) registerTriggerTools() {
-	s.mcp.AddTool(
-		mcp.NewTool("pull_next_trigger",
-			mcp.WithDescription("Long-poll for the next trigger to react to. Returns one of: a queued query (kind='query'), a freshly-completed lap (kind='lap_complete'), or a significant rule-engine event (kind='significant_event'). When kind='query', call submit_query_answer with the same job_id when done. Returns kind='none' on timeout — call again immediately to keep waiting."),
-			mcp.WithNumber("timeout_seconds", mcp.Description("Max time to block (default = server PI_AGENT_TRIGGER_TIMEOUT_SEC).")),
-		),
-		func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-			if s.deps.Triggers == nil {
-				return errResult(fmt.Errorf("trigger queue not configured")), nil
-			}
-			timeout := s.deps.TriggerTimeout
-			if v, ok := req.GetArguments()["timeout_seconds"].(float64); ok && v > 0 {
-				timeout = secsToDuration(v)
-			}
-			t, ok := s.deps.Triggers.Pull(ctx, timeout)
-			if !ok {
-				return textResult(`{"kind":"none"}`), nil
-			}
-			body, err := json.Marshal(t)
-			if err != nil {
-				return errResult(err), nil
-			}
-			return textResult(string(body)), nil
-		},
-	)
-
-	s.mcp.AddTool(
-		mcp.NewTool("submit_query_answer",
-			mcp.WithDescription("Reply to a queued query trigger. Writes the answer as a brain Observation under 'analyst.<context_topic>' AND enqueues an analyst_answer brain event so the Live engineer relays it on team radio (the model decides phrasing). Urgent=true bumps the event from P3 to P4."),
-			mcp.WithString("job_id", mcp.Required(), mcp.Description("The job_id from the pull_next_trigger response.")),
-			mcp.WithString("answer", mcp.Required(), mcp.Description("The answer text. Conversational, ≤3 complete sentences.")),
-			mcp.WithBoolean("urgent", mcp.Description("Override the trigger's urgent flag (default = inherit from trigger).")),
-		),
-		func(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-			if s.deps.Triggers == nil || s.deps.Brain == nil {
-				return errResult(fmt.Errorf("trigger queue / brain not configured")), nil
-			}
-			args := req.GetArguments()
-			jobID, _ := args["job_id"].(string)
-			answer, _ := args["answer"].(string)
-			if strings.TrimSpace(jobID) == "" || strings.TrimSpace(answer) == "" {
-				return errResult(fmt.Errorf("job_id and answer are required")), nil
-			}
-			question, topic, urgent, ok := s.deps.Triggers.CompleteQuery(jobID)
-			if !ok {
-				return errResult(fmt.Errorf("unknown job_id %q", jobID)), nil
-			}
-			if v, ok := args["urgent"].(bool); ok {
-				urgent = v
-			}
-			s.deps.Brain.Write(brain.Observation{
-				Topic:   brain.Topic(brain.AnalystTopicPrefix + topic),
-				Agent:   "pi_agent",
-				At:      nowFn(),
-				Summary: answer,
-				JobID:   jobID,
-				Urgent:  urgent,
-			})
-			s.deps.Brain.ClearPendingJob(jobID)
-
-			priority := 3
-			if urgent {
-				priority = 4
-			}
-			ev := brain.Event{
-				Type:         brain.EventAnalystAnswer,
-				Priority:     priority,
-				Summary:      truncate(answer, brain.MaxEventSummaryChars),
-				Reasoning:    truncate(answer, brain.MaxAnalystReasoningChars),
-				Source:       "pi_agent",
-				DedupKey:     "analyst_answer:" + topic,
-				DedupSubject: "analyst:" + topic,
-				DebugData: map[string]any{
-					"job_id":        jobID,
-					"context_topic": topic,
-					"question":      truncate(question, 200),
-				},
-			}
-			// talkLevel=10 → bypass the per-config talk-level floor. The
-			// driver explicitly asked the analyst; the answer should
-			// always reach the radio regardless of the noise setting.
-			if _, err := s.deps.Brain.EnqueueEvent(ev, 10); err != nil {
-				log.Warn().Err(err).Str("job_id", jobID).Str("topic", topic).Int("summary_len", len(ev.Summary)).Msg("pi_agent: analyst_answer enqueue failed — observation still written")
-				// Surface the failure to the caller so a model retry can fix it.
-				return errResult(fmt.Errorf("analyst_answer enqueue failed: %w", err)), nil
-			}
-			log.Info().Str("job_id", jobID).Str("topic", topic).Bool("urgent", urgent).Int("priority", priority).Int("answer_len", len(answer)).Str("question", truncate(question, 80)).Msg("pi_agent: query answered → analyst_answer event enqueued")
-			return textResult(`{"status":"ok"}`), nil
-		},
-	)
-}
-
-// ── 6. Write tools (gated) ──────────────────────────────────────────────────
+// ── 5. Write tools (gated) ──────────────────────────────────────────────────
+//
+// The pi-agent's pull_next_trigger / submit_query_answer / write_observation
+// / list_skills / get_skill tools were removed when the analyst moved to
+// opencode. opencode-driven prompts come in via session/prompt over ACP,
+// findings get persisted to the workspace via fs/write_text_file (auto-
+// scoped under <da-workspace>/learnings/), and the only remaining writer
+// here is push_insight + the reminder helpers.
 
 func (s *Server) registerWriteTools() {
 	s.mcp.AddTool(
-		mcp.NewTool("write_observation",
-			mcp.WithDescription("Record a finding under 'pi_agent.<topic>' for future ticks (and the dashboard) to see. Internal-only — does NOT speak to the driver. Use push_insight when you want the driver to hear it."),
-			mcp.WithString("topic", mcp.Required(), mcp.Description("Sub-topic, e.g. 'tires', 'pace', 'strategy'. Stored as 'pi_agent.<topic>'.")),
-			mcp.WithString("summary", mcp.Required(), mcp.Description("One-line headline.")),
-			mcp.WithString("body", mcp.Description("Optional structured details (any JSON-encodable string).")),
-			mcp.WithBoolean("hypothesis", mcp.Description("True = latest-wins per topic; false (default) = ring buffer.")),
-			mcp.WithNumber("confidence", mcp.Description("0.0–1.0; default 0.7.")),
-		),
-		func(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-			if s.deps.Brain == nil {
-				return errResult(fmt.Errorf("brain not configured")), nil
-			}
-			args := req.GetArguments()
-			topic, _ := args["topic"].(string)
-			summary, _ := args["summary"].(string)
-			topic = strings.TrimSpace(topic)
-			summary = strings.TrimSpace(summary)
-			if topic == "" || summary == "" {
-				return errResult(fmt.Errorf("topic and summary are required")), nil
-			}
-			body, _ := args["body"].(string)
-			hypothesis, _ := args["hypothesis"].(bool)
-			confidence := 0.7
-			if v, ok := args["confidence"].(float64); ok && v > 0 {
-				confidence = v
-			}
-			s.deps.Brain.Write(brain.Observation{
-				Topic:      brain.Topic("pi_agent." + topic),
-				Agent:      "pi_agent",
-				At:         nowFn(),
-				Summary:    summary,
-				Body:       body,
-				Hypothesis: hypothesis,
-				Confidence: confidence,
-			})
-			return textResult(`{"status":"ok"}`), nil
-		},
-	)
-
-	s.mcp.AddTool(
 		mcp.NewTool("push_insight",
-			mcp.WithDescription("Push a strategy insight onto the radio fanout. THIS REACHES THE DRIVER'S EARS. Always call recent_insights and recent_pi_observations first to avoid repeating yourself. Priority is capped server-side at PI_AGENT_MAX_PRIORITY."),
+			mcp.WithDescription("Push a strategy insight onto the radio fanout. THIS REACHES THE DRIVER'S EARS. Call recent_insights and recent_analyst_observations first to avoid repeating yourself. Priority is capped server-side."),
 			mcp.WithString("insight", mcp.Required(), mcp.Description("Radio-style sentence, ≤2 sentences.")),
-			mcp.WithNumber("priority", mcp.Description("1=info, 3=tactical, 5=critical. Default 2. Capped at PI_AGENT_MAX_PRIORITY.")),
-			mcp.WithString("source", mcp.Description("Sub-source for the insight log, e.g. 'pi_agent.tires'.")),
+			mcp.WithNumber("priority", mcp.Description("1=info, 3=tactical, 5=critical. Default 2.")),
+			mcp.WithString("source", mcp.Description("Sub-source for the insight log, e.g. 'analyst.tires'.")),
 		),
 		func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 			args := req.GetArguments()
@@ -700,15 +571,15 @@ func (s *Server) registerWriteTools() {
 			priority = clampPriority(priority, s.deps.MaxPriority)
 			source, _ := args["source"].(string)
 			if source == "" {
-				source = "pi_agent"
+				source = "analyst"
 			}
 			payload := map[string]any{
-				"source":      source,
-				"summary":     "analyst",
-				"insight":     insight,
+				"source":         source,
+				"summary":        "analyst",
+				"insight":        insight,
 				"recommendation": insight,
-				"priority":    priority,
-				"criticality": priority,
+				"priority":       priority,
+				"criticality":    priority,
 			}
 			body, err := s.httpPostJSON(ctx, "/api/strategy", payload)
 			if err != nil {
@@ -760,50 +631,6 @@ func (s *Server) registerWriteTools() {
 				return errResult(err), nil
 			}
 			return textResult(body), nil
-		},
-	)
-}
-
-// ── 7. Skills ───────────────────────────────────────────────────────────────
-
-func (s *Server) registerSkillTools() {
-	s.mcp.AddTool(
-		mcp.NewTool("list_skills",
-			mcp.WithDescription("List the agent's loadable skills (markdown playbooks in workspace/pi_skills/). Returns metadata only — call get_skill(name) to fetch a body. Always call this at the start of a tick to know what specialised guidance is available."),
-			mcp.WithString("filter", mcp.Description("Substring filter (case-insensitive) on name+description+when_to_use.")),
-		),
-		func(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-			if s.deps.Skills == nil {
-				return errResult(fmt.Errorf("skill registry not configured")), nil
-			}
-			filter, _ := req.GetArguments()["filter"].(string)
-			body, err := json.Marshal(s.deps.Skills.List(filter))
-			if err != nil {
-				return errResult(err), nil
-			}
-			return textResult(string(body)), nil
-		},
-	)
-
-	s.mcp.AddTool(
-		mcp.NewTool("get_skill",
-			mcp.WithDescription("Return the full markdown body of a skill — instructions, heuristics, sample SQL, push-criteria. Cheap; load lazily when picking a specialist."),
-			mcp.WithString("name", mcp.Required(), mcp.Description("Skill name as returned by list_skills.")),
-		),
-		func(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-			if s.deps.Skills == nil {
-				return errResult(fmt.Errorf("skill registry not configured")), nil
-			}
-			name, _ := req.GetArguments()["name"].(string)
-			s, err := s.deps.Skills.Get(name)
-			if err != nil {
-				return errResult(err), nil
-			}
-			body, err := json.Marshal(s)
-			if err != nil {
-				return errResult(err), nil
-			}
-			return textResult(string(body)), nil
 		},
 	)
 }

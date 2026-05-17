@@ -49,17 +49,16 @@ type Config struct {
 	LogLevel        string // zerolog level: trace, debug, info, warn, error, fatal, panic
 	WSPushRate      int    // WebSocket push rate in Hz (e.g. 10 = 100ms interval)
 
-	// --- Pi Agent (sandboxed background data-analyst team) ---
-	// Replaces the old Strategy Analyst. The Go server hosts an MCP server at
-	// PiAgentMCPPath; pi_agent_service.py is a Python child process whose only
-	// outward connection is that MCP endpoint. Event-driven only — no ticker.
-	PiAgentMode              string // "off" | "on"
-	PiAgentProvider          string // "anthropic" | "gemini" | "openai"
-	PiAgentModel             string // empty = provider default
-	PiAgentSpecialistModel   string // empty = same as planner
-	PiAgentMaxPriority       int    // cap on push_insight priority (1-5)
-	PiAgentMCPPath           string // HTTP path the MCP server is mounted on
-	PiAgentTriggerTimeoutSec int    // long-poll timeout (s) for pull_next_trigger
+	// --- Data Analyst (opencode-backed) ---
+	// Replaces the old hand-rolled pi-agent. The Go server launches
+	// `opencode acp` once per app lifetime and drives it via JSON-RPC 2.0
+	// over stdin/stdout. The MCP server (mounted at /mcp) is the analyst's
+	// only outward channel — same surface Gemini Live uses.
+	DAEnabled              bool   // gate the analyst entirely
+	DAWorkspaceDir         string // empty = ~/.race-engineer/da-workspace
+	DAProvider             string // empty = first-run wizard / opencode auth decides
+	DAModel                string // empty = provider default
+	DAHandshakeTimeoutSec  int    // per-call timeout for ACP session/new (initialize is bounded separately at 15s)
 	// PTT settings are stored atomically so the dashboard can change them
 	// without restarting the state-writer goroutine. Read with the getter
 	// methods (PTTButton, PTTMode, …) and write with the setters.
@@ -183,18 +182,16 @@ func Load() *Config {
 		LLMModel:        src.str("LLM_MODEL", ""),
 		AnthropicAPIKey: src.str("ANTHROPIC_API_KEY", ""),
 		OpenAIAPIKey:    src.str("OPENAI_API_KEY", ""),
-		TTSVoice:        src.str("TTS_VOICE", ""),
+		TTSVoice:        src.str("TTS_VOICE", "Charon"),
 		WorkspaceDir:    src.str("WORKSPACE_DIR", "workspace"),
 		LogLevel:        src.str("LOG_LEVEL", "info"),
 		WSPushRate:      src.intv("WS_PUSH_RATE", 10),
 
-		PiAgentMode:              src.str("PI_AGENT_MODE", "on"),
-		PiAgentProvider:          src.str("PI_AGENT_PROVIDER", "gemini"),
-		PiAgentModel:             src.str("PI_AGENT_MODEL", "gemini-3.1-flash-lite"),
-		PiAgentSpecialistModel:   src.str("PI_AGENT_SPECIALIST_MODEL", "gemini-3.1-flash-lite"),
-		PiAgentMaxPriority:       src.intv("PI_AGENT_MAX_PRIORITY", 3),
-		PiAgentMCPPath:           src.str("PI_AGENT_MCP_PATH", "/mcp"),
-		PiAgentTriggerTimeoutSec: src.intv("PI_AGENT_TRIGGER_TIMEOUT_SEC", 10),
+		DAEnabled:             src.boolv("DA_ENABLED", true),
+		DAWorkspaceDir:        src.str("DA_WORKSPACE_DIR", ""),
+		DAProvider:            src.str("DA_PROVIDER", "gemini"),
+		DAModel:               src.str("DA_MODEL", "gemini-3.1-flash-lite"),
+		DAHandshakeTimeoutSec: src.intv("DA_HANDSHAKE_TIMEOUT_SEC", 90),
 
 		// VoiceMode is loaded below — it picks the voice path and also
 		// drives the legacy GeminiLiveEnabled flag so existing callers
@@ -278,7 +275,8 @@ func Load() *Config {
 		Int32("talk_level", c.TalkLevel.Load()).
 		Str("llm_provider", c.LLMProvider).
 		Str("llm_model", c.LLMModel).
-		Str("pi_agent_mode", c.PiAgentMode).
+		Bool("da_enabled", c.DAEnabled).
+		Str("da_provider", c.DAProvider).
 		Bool("gemini_live", c.GeminiLiveEnabled).
 		Str("voice_mode", c.VoiceMode).
 		Msg("Configuration loaded")

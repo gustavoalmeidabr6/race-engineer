@@ -16,7 +16,7 @@ const NAV_ITEMS: NavItem[] = [
   { to: '/map', label: 'Live Map', icon: '◎', liveDot: true },
   { to: '/telemetry', label: 'Telemetry', icon: '〰' },
   { to: '/insights', label: 'Deep Insights', icon: '▲' },
-  { to: '/analyst', label: 'Analyst Team', icon: '◈' },
+  { to: '/analyst', label: 'Data Analyst', icon: '◈' },
   { to: '/debug', label: 'Live Debug', icon: '🐛' },
   { to: '/settings', label: 'Settings', icon: '⚙' },
   { to: '/help', label: 'Help', icon: '?' },

@@ -10,11 +10,11 @@ import (
 	"github.com/gofiber/fiber/v2"
 	"strconv"
 
+	"github.com/tusharbhardwaj/race-engineer/telemetry-core/internal/analyst"
 	"github.com/tusharbhardwaj/race-engineer/telemetry-core/internal/brain"
 	"github.com/tusharbhardwaj/race-engineer/telemetry-core/internal/config"
 	"github.com/tusharbhardwaj/race-engineer/telemetry-core/internal/insights"
 	"github.com/tusharbhardwaj/race-engineer/telemetry-core/internal/intelligence"
-	mcpx "github.com/tusharbhardwaj/race-engineer/telemetry-core/internal/mcp"
 	"github.com/tusharbhardwaj/race-engineer/telemetry-core/internal/models"
 	"github.com/tusharbhardwaj/race-engineer/telemetry-core/internal/plan"
 	"github.com/tusharbhardwaj/race-engineer/telemetry-core/internal/state"
@@ -34,8 +34,7 @@ type Deps struct {
 	PacketsRx      func() uint64 // closure to read ingester packet count
 	Workspace      *workspace.Writer
 	Gate           *intelligence.CommsGate      // unified insight evaluation & communication
-	PiAgent        *mcpx.TriggerQueue           // pi-agent trigger queue (replaces the old strategy analyst)
-	PiActivity     *mcpx.ActivityHub            // pi-agent live activity feed (Analyst Team dashboard tab)
+	Analyst        *analyst.Runtime             // opencode-backed Data Analyst (replaces the old pi-agent)
 	RawInsightChan chan<- models.DrivingInsight // strategy webhook fanout into CommsGate
 	Hub            *Hub                         // WebSocket hub for live push
 	VoiceClient    *intelligence.VoiceClient    // voice synthesis client (for acks)
@@ -469,23 +468,23 @@ func brainSnapshotHandler(deps *Deps) fiber.Handler {
 	}
 }
 
-// analystQueryHandler enqueues a question onto the pi-agent trigger queue
-// and returns immediately with a job_id. The pi agent's planner long-polls
-// pull_next_trigger, dispatches its responder specialist, and writes the
-// answer back as a brain Observation under topic "analyst.<context_topic>"
-// via the submit_query_answer MCP tool. When urgent=true, the answer is
-// also POSTed to /api/strategy so the existing voice pipeline speaks it.
+// analystQueryHandler hands a driver question to the in-process opencode
+// Data Analyst and returns immediately with a job_id. The analyst routes
+// the question to opencode via ACP session/prompt, captures the streamed
+// answer, and pushes it back into the brain as both an Observation under
+// "analyst.<context_topic>" and an analyst_answer event so Gemini Live
+// relays it on team radio.
 //
-// Contract preserved (was the old strategy analyst's QueryAsync):
+// Contract preserved (was the old pi-agent's QueryAsync):
 //
 //	POST /api/analyst/query
 //	body: {"question": "...", "context_topic": "tire_strategy", "urgent": false}
-//	202   {"job_id": "anq_...", "status": "queued", "eta_seconds": 10}
+//	202   {"job_id": "anq_...", "status": "queued", "eta_seconds": 30}
 func analystQueryHandler(deps *Deps) fiber.Handler {
 	return func(c *fiber.Ctx) error {
-		if deps.PiAgent == nil {
+		if deps.Analyst == nil {
 			return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{
-				"error": "pi agent trigger queue not initialised",
+				"error": "data analyst not initialised",
 			})
 		}
 		var payload struct {
@@ -508,14 +507,70 @@ func analystQueryHandler(deps *Deps) fiber.Handler {
 		if topic == "" {
 			topic = "general"
 		}
-		jobID, _ := deps.PiAgent.EnqueueQuery(question, topic, payload.Urgent)
+
+		// onAnswer is invoked from the analyst goroutine when opencode
+		// returns the final turn. It mirrors the side effects the old
+		// submit_query_answer MCP tool performed.
+		onAnswer := func(jobID, q, t, answer string, urgent bool) {
+			if deps.Brain != nil && answer != "" {
+				deps.Brain.Write(brain.Observation{
+					Topic:   brain.Topic(brain.AnalystTopicPrefix + t),
+					Agent:   "analyst",
+					Summary: answer,
+					JobID:   jobID,
+					Urgent:  urgent,
+				})
+				deps.Brain.ClearPendingJob(jobID)
+				priority := 3
+				if urgent {
+					priority = 4
+				}
+				ev := brain.Event{
+					Type:         brain.EventAnalystAnswer,
+					Priority:     priority,
+					Summary:      truncate(answer, brain.MaxEventSummaryChars),
+					Reasoning:    truncate(answer, brain.MaxAnalystReasoningChars),
+					Source:       "analyst",
+					DedupKey:     "analyst_answer:" + t,
+					DedupSubject: "analyst:" + t,
+					DebugData: map[string]any{
+						"job_id":        jobID,
+						"context_topic": t,
+						"question":      truncate(q, 200),
+					},
+				}
+				if _, err := deps.Brain.EnqueueEvent(ev, 10); err != nil {
+					// Best-effort — the observation is already recorded.
+					_ = err
+				}
+			}
+			if deps.Transcript != nil {
+				deps.Transcript.Append(transcript.Event{
+					Kind:  transcript.KindAnalystAnswer,
+					Actor: "analyst",
+					Text:  answer,
+					Meta: map[string]any{
+						"job_id":        jobID,
+						"context_topic": t,
+						"urgent":        urgent,
+					},
+				})
+			}
+		}
+
+		jobID, _ := deps.Analyst.Query(c.Context(), question, topic, payload.Urgent, onAnswer)
+		if jobID == "" {
+			return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{
+				"error": "analyst not ready",
+			})
+		}
 		if deps.Brain != nil {
 			deps.Brain.RegisterPendingJob(jobID, question, topic)
 		}
 		if deps.Transcript != nil {
 			deps.Transcript.Append(transcript.Event{
 				Kind:  transcript.KindAnalystQuery,
-				Actor: "pi_agent",
+				Actor: "analyst",
 				Text:  question,
 				Meta: map[string]any{
 					"job_id":        jobID,
@@ -527,25 +582,41 @@ func analystQueryHandler(deps *Deps) fiber.Handler {
 		return c.Status(fiber.StatusAccepted).JSON(fiber.Map{
 			"job_id":      jobID,
 			"status":      "queued",
-			"eta_seconds": 10,
+			"eta_seconds": 30,
 		})
 	}
 }
 
-// analystJobsHandler exposes the current pending pi-agent query jobs for
-// debugging. Returns an array — empty if nothing in flight.
+// analystJobsHandler exposes the currently in-flight analyst queries.
 //
 //	GET /api/analyst/jobs → [{"job_id":"...","question":"...", ...}]
 func analystJobsHandler(deps *Deps) fiber.Handler {
 	return func(c *fiber.Ctx) error {
-		if deps.PiAgent != nil {
-			return c.JSON(deps.PiAgent.PendingJobs())
+		if deps.Analyst != nil {
+			return c.JSON(deps.Analyst.PendingJobs())
 		}
 		if deps.Brain != nil {
 			return c.JSON(deps.Brain.PendingJobs())
 		}
 		return c.JSON([]any{})
 	}
+}
+
+// truncate clips s to at most n bytes, suffixing "…" on overflow. UTF-8
+// boundary-safe enough for our analyst answers (they're plain text).
+func truncate(s string, n int) string {
+	if n <= 0 || len(s) <= n {
+		return s
+	}
+	const suffix = "…"
+	if n < len(suffix) {
+		return s[:n]
+	}
+	cut := n - len(suffix)
+	for cut > 0 && cut < len(s) && s[cut]&0xC0 == 0x80 {
+		cut--
+	}
+	return s[:cut] + suffix
 }
 
 // eventInterruptHandler accepts a producer-pushed Event onto the Interrupts
@@ -794,23 +865,22 @@ func insightHistoryHandler(deps *Deps) fiber.Handler {
 	}
 }
 
-// agentStatusHandler returns a snapshot of the pi-agent state. Vestigial
-// route — kept so the dashboard's existing /api/agent/status poll keeps
-// returning a sensible payload.
+// agentStatusHandler is a back-compat shim mapping the old pi-agent status
+// route onto the new analyst runtime so any caller still hitting
+// /api/agent/status sees a non-broken payload. New code should use
+// /api/analyst/status which exposes the full Runtime.Status() snapshot.
 func agentStatusHandler(deps *Deps) fiber.Handler {
 	return func(c *fiber.Ctx) error {
-		enabled := deps.PiAgent != nil
-		depth := 0
-		if enabled {
-			depth = deps.PiAgent.Depth()
+		if deps.Analyst == nil {
+			return c.JSON(fiber.Map{
+				"enabled": false,
+				"reason":  "analyst disabled",
+			})
 		}
-		return c.JSON(fiber.Map{
-			"enabled":       enabled,
-			"trigger_depth": depth,
-			"mode":          deps.Cfg.PiAgentMode,
-			"provider":      deps.Cfg.PiAgentProvider,
-			"logs":          []any{},
-		})
+		status := deps.Analyst.Status()
+		status["enabled"] = true
+		status["logs"] = []any{}
+		return c.JSON(status)
 	}
 }
 
