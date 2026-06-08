@@ -2,9 +2,9 @@
   "$schema": "https://wails.io/schemas/config.v2.json",
   "name": "RaceEngineer",
   "outputfilename": "RaceEngineer",
-  "frontend:install": "../build-frontend.sh install",
-  "frontend:build": "../build-frontend.sh build",
-  "frontend:dev:watcher": "../build-frontend.sh dev",
+  "frontend:install": "bash ../build-frontend.sh install",
+  "frontend:build": "bash ../build-frontend.sh build",
+  "frontend:dev:watcher": "bash ../build-frontend.sh dev",
   "frontend:dev:serverUrl": "http://localhost:8092",
   "author": {
     "name": "iamtushar324",
