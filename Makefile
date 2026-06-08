@@ -214,7 +214,7 @@ app-windows: sync-da-seed download-opencode
 	@echo "  • Compiling telemetry-core for embed (GOOS=windows GOARCH=amd64)"
 	@rm -f desktop/RaceEngineer/bin/telemetry-core
 	cd telemetry-core && GOOS=windows GOARCH=amd64 go build -o ../desktop/RaceEngineer/bin/telemetry-core ./cmd/server
-	cd desktop/RaceEngineer && (command -v wails >/dev/null 2>&1 && wails || $(WAILS)) build -platform windows/amd64 -clean
+	cd desktop/RaceEngineer && wails build -platform windows/amd64 -clean
 	@echo "Built: $(APP_EXE_WIN)"
 
 # dist-windows wraps the produced .exe in the zip filename the website
