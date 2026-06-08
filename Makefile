@@ -229,5 +229,5 @@ dist-windows: app-windows
 	@# `zip -j` strips directory paths so the archive root holds RaceEngineer.exe
 	@# directly, matching what the website's "Download for Windows" button
 	@# leads users to expect after extraction.
-	cd $$(dirname "$(APP_EXE_WIN)") && zip -j "$$(basename "$(DIST_ZIP_WIN)")" "$$(basename "$(APP_EXE_WIN)")"
+	cd $$(dirname "$(APP_EXE_WIN)") && powershell.exe -NoProfile -Command "Compress-Archive -Path RaceEngineer.exe -DestinationPath RaceEngineer-windows-x64.zip -Force"
 	@echo "Built: $(DIST_ZIP_WIN) ($(call file_size,$(DIST_ZIP_WIN)) bytes)"
